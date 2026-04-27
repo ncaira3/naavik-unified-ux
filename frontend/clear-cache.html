@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Clear Map Cache</title>
+</head>
+<body>
+  <h1>Clearing Map Cache...</h1>
+  <p id="status">Working...</p>
+  <script>
+    // Clear sessionStorage
+    sessionStorage.removeItem('mapData');
+    
+    // Clear localStorage
+    localStorage.removeItem('mapData');
+    
+    document.getElementById('status').innerHTML = 
+      '✅ Cache cleared!<br><br>' +
+      '<a href="/" style="font-size: 18px; color: #ef4444; text-decoration: none; border: 2px solid #ef4444; padding: 10px 20px; border-radius: 5px;">← Back to App</a>';
+    
+    console.log('Map cache cleared from sessionStorage and localStorage');
+  </script>
+</body>
+</html>

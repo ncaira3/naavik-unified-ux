@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(tsc --noEmit src/hooks/useCachedQuery.ts)",
+      "Bash(npx tsc --noEmit src/hooks/useCachedQuery.ts)",
+      "Bash(git add -A)",
+      "Bash(git add frontend/src/)",
+      "Bash(git commit:*)",
+      "Bash(git add frontend/src/components/AppStore/VisualAppBuilder.tsx)",
+      "Bash(git add frontend/src/components/AppStore/ConversationalAppBuilder.tsx)",
+      "Bash(docker-compose ps)",
+      "Bash(docker-compose logs --tail=50)"
+    ],
+    "additionalDirectories": [
+      "/Users/admin/nirmalc/.git"
+    ]
+  }
+}

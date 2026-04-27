@@ -1,0 +1,105 @@
+{
+  "version": "v1",
+  "scenarioType": "prb_qrxlevmin_v1",
+  "threadId": "bd145525-dab5-4b53-9e6c-70141d336fa5",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "label": "Start",
+      "data": {
+        "scenarioType": "prb_qrxlevmin_v1"
+      }
+    },
+    {
+      "id": "condition",
+      "type": "condition",
+      "label": "IF PRB Utilization < 50%",
+      "data": {
+        "technology": "4G",
+        "kpi": "PRB Utilization",
+        "operator": "<",
+        "threshold": 50,
+        "unit": "%",
+        "granularity": "hourly"
+      }
+    },
+    {
+      "id": "selection",
+      "type": "selection",
+      "label": "Select cells (any 4G cell meeting threshold)",
+      "data": {
+        "technology": "4G",
+        "scope": "any 4G cell meeting threshold",
+        "criteria": "PRB Utilization < 50%"
+      }
+    },
+    {
+      "id": "action",
+      "type": "action",
+      "label": "set EUtranCellRelation.cellIndividualOffset by 1",
+      "data": {
+        "moClass": "EUtranCellRelation",
+        "parameter": "cellIndividualOffset",
+        "actionType": "set",
+        "actionValue": 1,
+        "safeMode": true
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "label": "End",
+      "data": {
+        "outcome": "workflow + code generated"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "start",
+      "target": "condition"
+    },
+    {
+      "id": "e2",
+      "source": "condition",
+      "target": "selection",
+      "label": "true"
+    },
+    {
+      "id": "e3",
+      "source": "selection",
+      "target": "action"
+    },
+    {
+      "id": "e4",
+      "source": "action",
+      "target": "end"
+    }
+  ],
+  "metadata": {
+    "appContext": {
+      "appKind": "rApp",
+      "runtimeTarget": "EIAP",
+      "oem": "Ericsson",
+      "intentCategory": null,
+      "problemDescription": null
+    },
+    "canonical": {
+      "kpi": [
+        {
+          "name": "PRB Utilization",
+          "operator": "<",
+          "threshold": 50,
+          "unit": "%"
+        }
+      ],
+      "parameter": "cellIndividualOffset",
+      "moClass": "EUtranCellRelation",
+      "threshold": 50,
+      "unit": "%",
+      "granularity": "hourly"
+    }
+  }
+}

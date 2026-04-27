@@ -1,0 +1,811 @@
+/**
+ * Frontend Intent Classifier
+ *
+ * Mirrors the backend IntentDictionaryService.  Each intent has ~50 phrase
+ * variations.  The classifier lower-cases the input and checks against every
+ * phrase; the first match wins.  Intents are ordered from most-specific to
+ * least-specific.
+ */
+
+export type NaavikIntent =
+  | 'worst_offenders'
+  | 'rca_explain'
+  | 'solution_recommendation'
+  | 'implement_change'
+  | 'escalate_ticket'
+  | 'appgen_create'
+  | 'knowledge_qa'
+  | 'provision'
+  | 'kpi_request'
+  | 'map_view'
+  | 'site_health'
+  | 'network_health'
+  | 'unmatched';
+
+interface IntentEntry {
+  intent: NaavikIntent;
+  phrases: string[];
+}
+
+const INTENT_DICTIONARY: IntentEntry[] = [
+  // 0. KPI Request / Dashboard (most specific, should be first)
+  {
+    intent: 'kpi_request',
+    phrases: [
+      'show kpi for site',
+      'show me kpi for',
+      'major kpi for',
+      'kpi dashboard for',
+      'kpi for site',
+      'telemetry for',
+      'show telemetry for',
+      'site kpis',
+      'kpi dashboard',
+      'kpi telemetry',
+      'show me major kpi',
+      'quick dashboard for',
+      'kpi quick view',
+      'network kpi for',
+      'display kpi for',
+      'check kpi for',
+      'view kpi for',
+      'kpi trends for',
+      'show kpi trends',
+      'kpi for',
+      'get kpi for',
+      'metrics for site',
+      'performance metrics for',
+      'kpi data for',
+    ],
+  },
+
+  // 1. Map View (visualize network on map)
+  {
+    intent: 'map_view',
+    phrases: [
+      'show map',
+      'network map',
+      'show me the map',
+      'open map',
+      'site map',
+      'show sites on map',
+      'plot sites',
+      'map view',
+      'show degraded sites on map',
+      'show outage sites',
+      'outage map',
+      'congestion map',
+      'overutilized cells map',
+      'visualize the network',
+      'view network map',
+      'map of sites',
+      'where are the sites',
+      'show me sites',
+      'map of my network',
+      'network visualization',
+    ],
+  },
+
+  // 2. Site Health (health summary for a specific site)
+  {
+    intent: 'site_health',
+    phrases: [
+      'how is site',
+      'site health for',
+      'check site',
+      'site status for',
+      'what is the health of site',
+      'health check for',
+      'how is the network at',
+      'status of site',
+      'how is site performing',
+      'site performance for',
+      'network performance at site',
+      'site overview for',
+      'summary for site',
+      'health of site',
+      'is site down',
+      'any issues at site',
+      'what is wrong with site',
+      'site summary for',
+    ],
+  },
+
+  // 3. Worst Offenders / Top Offenders
+  {
+    intent: 'worst_offenders',
+    phrases: [
+      'worst offender',
+      'top offender',
+      'worst performing site',
+      'worst performing cell',
+      'show me the offenders',
+      'list offenders',
+      'network offenders',
+      'which sites are degraded',
+      'degraded sites today',
+      'show degraded sites',
+      'most impacted sites',
+      'highest impact sites',
+      'sites with worst kpi',
+      'sites with lowest kpi',
+      'bottom performing sites',
+      'underperforming sites',
+      'troubled sites',
+      'problem sites',
+      'worst sites in the network',
+      'worst cells today',
+      'show me the worst network sites',
+      'which sites need attention',
+      'top degradation list',
+      'degradation ranking',
+      'rank sites by degradation',
+      'offender table',
+      'offender list',
+      'daily offenders',
+      'offenders for today',
+      'offenders for yesterday',
+      'offenders for this week',
+      'worst offenders for',
+      'top offenders for',
+      'give me the offender report',
+      'network health offenders',
+      'who are the worst offenders',
+      'tell me the worst sites',
+      "what are today's offenders",
+      'what are the problem sites today',
+      'show offender dashboard',
+      'worst network performers',
+      'least performing sites',
+      'lowest ranked sites',
+      'sites below threshold',
+      'sites failing kpi',
+      'critical sites list',
+      'observe and analyze',
+      'show me network issues',
+      'what sites are struggling',
+      'degraded network summary',
+      'give me the offender analysis',
+      'network problems today',
+      'any issues in the network',
+      'sites with problems',
+      'what happened in the network',
+      'daily degradation report',
+      'show me bad sites',
+      'kpi failures today',
+      'which cells are failing',
+      'network status report',
+      'network health check',
+      'site health report',
+      'any degradation today',
+      'problematic sites today',
+      'poor performing sites',
+      'sites performing poorly',
+      'show me failing sites',
+      'any sites in trouble',
+      'are there any offenders',
+    ],
+  },
+
+  // 2. Escalate Ticket (before RCA/Solution to catch first)
+  {
+    intent: 'escalate_ticket',
+    phrases: [
+      'escalate ticket',
+      'escalate the ticket',
+      'escalate outage ticket',
+      'escalate to p1',
+      'raise a ticket',
+      'create a ticket',
+      'open a ticket',
+      'file a ticket',
+      'submit a ticket',
+      'raise incident',
+      'create incident',
+      'open incident',
+      'escalate incident',
+      'ticket escalation',
+      'incident escalation',
+      'escalate this issue',
+      'escalate the outage',
+      'escalate this outage',
+      'raise priority to p1',
+      'upgrade ticket priority',
+      'make this p1',
+      'mark as p1',
+      'set priority to p1',
+      'urgent ticket',
+      'urgent escalation',
+      'critical escalation',
+      'escalate to operations',
+      'escalate to noc',
+      'notify noc',
+      'alert the noc',
+      'raise an alarm',
+      'trigger alarm escalation',
+      'file an outage report',
+      'report this outage',
+      'log a fault ticket',
+      'raise a fault',
+      'fault escalation',
+      'network fault ticket',
+      'transport fault ticket',
+      'backhaul fault',
+      'create trouble ticket',
+      'raise trouble ticket',
+      'open trouble ticket',
+      'tt escalation',
+      'escalate the rca finding',
+      'escalate outage neighbor',
+      'please escalate',
+      'i want to escalate',
+      'can you escalate',
+      'need to escalate this',
+      'forward to field team',
+      'send to field',
+      'dispatch field crew',
+      'notify engineering',
+      'open a case',
+      'create a case',
+      'need field support',
+      'outage notification',
+      'inform operations',
+      'this needs attention',
+      'high priority issue',
+      'change to p1',
+      'bump to p1',
+      'escalation needed',
+      'get someone on this',
+      'this is urgent',
+      'send notification to noc',
+      'page the on-call',
+      'report a fault',
+    ],
+  },
+
+  // 6. Implement Change / Control Agent
+  {
+    intent: 'implement_change',
+    phrases: [
+      'implement the change',
+      'implement change',
+      'implement the parameter change',
+      'implement parameter change',
+      'apply the change',
+      'apply change',
+      'apply the fix',
+      'apply fix',
+      'execute the change',
+      'execute change',
+      'execute parameter update',
+      'run the parameter change',
+      'trigger the change',
+      'trigger parameter change',
+      'push the change',
+      'push parameter update',
+      'deploy the change',
+      'activate the solution',
+      'implement the solution',
+      'apply the solution',
+      'execute the solution',
+      'execute the recommendation',
+      'apply recommended change',
+      'go ahead with the change',
+      'proceed with the change',
+      'confirm and execute',
+      'make the change',
+      'do the parameter update',
+      'change the parameter',
+      'update the parameter',
+      'set cellindividualoffset',
+      'adjust cio',
+      'tune cio',
+      'implement traffic steering',
+      'apply traffic balancing',
+      'execute traffic balancing',
+      'start the oss change',
+      'send to oss',
+      'push to oss adapter',
+      'implement per recommendation',
+      'implement per the solution',
+      'apply per the solution recommendation',
+      'implement the recommended action',
+      'go ahead and implement',
+      'yes implement it',
+      'yes apply the change',
+      'proceed with parameter update',
+      'confirm the parameter change',
+      'authorize the change',
+      'trigger oss execution',
+      'enact the change',
+      'carry out the change',
+      'do it',
+      'yes do it',
+      'run it',
+      'execute it',
+      'go for it',
+      "let's do it",
+      'make it happen',
+      'approve the change',
+      'submit the change',
+      'commit the change',
+      'roll out the change',
+      'push the fix',
+      'accept and apply',
+      'confirmed apply',
+      'just do it',
+      'yes go ahead',
+      'approved',
+      'green light the change',
+    ],
+  },
+
+  // 7. Solution Recommendation
+  {
+    intent: 'solution_recommendation',
+    phrases: [
+      'solution recommendation',
+      'solution for this',
+      'recommend a solution',
+      'recommend a fix',
+      'recommend an action',
+      'recommended action',
+      'recommended solution',
+      'recommended next step',
+      'what do you recommend',
+      'what should we do',
+      'what should i do',
+      'what action should i take',
+      'what is the fix',
+      'how do we fix this',
+      'how to fix this',
+      'how to resolve this',
+      'how should we remediate',
+      'suggest a fix',
+      'suggest a solution',
+      'suggest a resolution',
+      'suggest corrective action',
+      'give me the solution',
+      'show me the solution',
+      'provide a recommendation',
+      'provide solution recommendation',
+      'is there a solution',
+      'any solution for this',
+      'any recommendation',
+      'do you have a recommendation',
+      'can you recommend',
+      'what corrective action',
+      'what remediation',
+      'next best action',
+      'what are the next steps',
+      'propose a fix',
+      'propose a solution',
+      'resolution for this issue',
+      'resolution for this degradation',
+      'how to address this',
+      'how to mitigate this',
+      'mitigation options',
+      'mitigation recommendation',
+      'traffic steering recommendation',
+      'what parameter should i change',
+      'what should be tuned',
+      'optimization recommendation',
+      'optimization suggestion',
+      'can this be fixed',
+      'is there a workaround',
+      'show recommended action',
+      'provide a corrective action',
+      'what is the solution',
+      'what is the recommended solution',
+      'what would you suggest',
+      'what is your suggestion',
+      'how can we fix this',
+      'how can this be resolved',
+      'what is the best action',
+      'recommend a solution for this',
+      'recommend a solution for this issue',
+      'what to do about this',
+      'what to do next',
+      'how do we handle this',
+      'how do we address this',
+      'how should we handle this',
+    ],
+  },
+
+  // 8. RCA Explanation
+  {
+    intent: 'rca_explain',
+    phrases: [
+      'explain the rca',
+      'explain rca',
+      'show rca',
+      'show the rca',
+      'what is the rca',
+      'what is the root cause',
+      'root cause analysis',
+      'root cause for',
+      'rca for site',
+      'rca for this site',
+      'rca at site',
+      'rca of site',
+      'rca explanation',
+      'tell me the rca',
+      'give me the rca',
+      'what caused the degradation',
+      'why is this site degraded',
+      'why is this site down',
+      'why is this cell degraded',
+      'what went wrong at',
+      'what happened at site',
+      'what is wrong with site',
+      'what is impacting site',
+      'diagnose site',
+      'diagnose this site',
+      'investigate site',
+      'investigate the issue at',
+      'analyze root cause',
+      'analyze degradation',
+      'degradation analysis',
+      'degradation reason',
+      'cause of degradation',
+      'cause of outage',
+      'reason for outage',
+      'why did this fail',
+      'failure analysis',
+      'explain why',
+      'explain the issue',
+      'explain the degradation',
+      'explain the failure',
+      'explain the outage',
+      'show me the root cause',
+      'show root cause map',
+      'rca map',
+      'rca story',
+      'rca map story',
+      'show the reasoning',
+      'what does the reasoning agent say',
+      'run rca',
+      'perform rca',
+      'deep dive into site',
+      'detailed analysis of site',
+      'what happened',
+      "what's going on at site",
+      'breakdown of the issue',
+      'issue breakdown',
+      'root cause report',
+      'why is kpi low',
+      'why is kpi degraded',
+      "what's the cause",
+      'what caused this',
+      'reason for degradation',
+      'analyze this site',
+      'analyze this issue',
+      'tell me what went wrong',
+      'issue analysis',
+      'show me why',
+      'what is happening at',
+      'why is there an outage',
+      'why are cells failing',
+      'site investigation',
+    ],
+  },
+
+  // 9. AppGen / Create rApp
+  {
+    intent: 'appgen_create',
+    phrases: [
+      'build an app',
+      'build me an app',
+      'build a rapp',
+      'build me a rapp',
+      'create an app',
+      'create a rapp',
+      'create an rapp',
+      'generate an app',
+      'generate a rapp',
+      'generate code',
+      'generate rapp code',
+      'automate this solution',
+      'automate the solution',
+      'automate via appgen',
+      'automate with appgen',
+      'use appgen',
+      'open appgen',
+      'start appgen',
+      'launch appgen',
+      'i want to build an app',
+      'i want to create an app',
+      'i want to create a rapp',
+      'create automation',
+      'build automation',
+      'build an automation',
+      'create automated flow',
+      'automate this logic',
+      'automate this workflow',
+      'write me an app',
+      'write a rapp',
+      'code a rapp',
+      'develop a rapp',
+      'make an app for this',
+      'make a rapp for this',
+      'can you build an app',
+      'can you create a rapp',
+      'i need an app',
+      'i need a rapp',
+      'design a rapp',
+      'design an automation',
+      'app for traffic steering',
+      'rapp for load balancing',
+      'rapp for optimization',
+      'create an eiap app',
+      'build an eiap app',
+      'automate parameter change',
+      'app that monitors',
+      'app that changes parameter',
+      'create a new app',
+      'start a new build',
+      'new rapp',
+      'build an app to automate',
+      'make an automation',
+      'code an automation',
+      'program a rapp',
+      'develop an automation',
+      'scaffold a rapp',
+      'i want automation',
+      'let me build an app',
+      'start building an app',
+      'start coding',
+      'generate the code',
+      'produce a rapp',
+      'draft a rapp',
+      'prototype a rapp',
+      'spin up a rapp',
+      'create a network app',
+      'build a network app',
+      'codegen',
+      'code generation',
+    ],
+  },
+
+  // 10. Provisioning / ZTP
+  {
+    intent: 'provision',
+    phrases: [
+      'provision a site',
+      'provision site',
+      'provision new site',
+      'provision cell',
+      'trigger provisioning',
+      'start provisioning',
+      'run provisioning',
+      'site provisioning',
+      'cell provisioning',
+      'ztp',
+      'zero touch provisioning',
+      'zero-touch provisioning',
+      'add site to queue',
+      'add to provisioning queue',
+      'queue a site',
+      'onboard a site',
+      'onboard new site',
+      'commission a site',
+      'commission new site',
+      'site commissioning',
+      'new site setup',
+      'activate a site',
+      'activate new site',
+      'site activation',
+      'bring up a site',
+      'bring up new site',
+      'configure a new site',
+      'configure new cell',
+      'set up a new site',
+      'setup new site',
+      'deploy a new site',
+      'deploy new cell',
+      'add a new site',
+      'install a new site',
+      'site installation',
+      'site integration',
+      'integrate a new site',
+      'open provisioning',
+      'open provision',
+      'go to provisioning',
+      'go to provision',
+      'take me to provisioning',
+      'trigger a change',
+      'trigger change',
+      'change a parameter',
+      'change parameter on site',
+      'update parameter on site',
+      'set parameter on site',
+      'modify parameter',
+      'parameter change on',
+      'oss parameter change',
+      'network provisioning',
+      'roll out a site',
+      'add equipment',
+      'plan a new site',
+      'new cell setup',
+      'cell activation',
+      'add new cell',
+      'launch a new site',
+      'start site rollout',
+      'network expansion',
+      'add capacity',
+      'expand the network',
+      'cell setup',
+      'add to network',
+      'new deployment',
+      'rollout plan',
+      'site turnup',
+      'turn up a site',
+      'plug and play',
+    ],
+  },
+
+  // 11. Knowledge / Telco Library
+  {
+    intent: 'knowledge_qa',
+    phrases: [
+      'what is qrxlevmin',
+      'what is crsgain',
+      'what is a3offset',
+      'what is cellindividualoffset',
+      'what is prb',
+      'what is prb utilization',
+      'explain qrxlevmin',
+      'explain the parameter',
+      'explain this kpi',
+      'explain this parameter',
+      'what does this kpi mean',
+      'what does this parameter do',
+      'what is rrc setup',
+      'what is erab',
+      'what is handover',
+      'what is rsrp',
+      'what is rsrq',
+      'what is sinr',
+      'what is bler',
+      'what is cqi',
+      'what is throughput',
+      'what is latency',
+      'what is retainability',
+      'what is accessibility',
+      'what is availability',
+      'what is data drop rate',
+      'what is data acc rate',
+      'tell me about',
+      'how does it work',
+      'how does this work',
+      'define this parameter',
+      'definition of',
+      'what parameters affect',
+      'which kpis measure',
+      'what is the range of',
+      'what is the default value',
+      'what is the recommended value',
+      'what kpi',
+      'tell me about lte',
+      'tell me about 5g nr',
+      'explain 3gpp',
+      'what is eutran',
+      'what is nr',
+      'what is enodeb',
+      'what is gnodeb',
+      'explain mobility',
+      'explain coverage',
+      'explain capacity',
+      'what affects coverage',
+      'what affects capacity',
+      'telco library',
+      'ask the library',
+      'what does this mean',
+      'meaning of',
+      'how is it calculated',
+      'formula for',
+      'what unit is',
+      'what is the unit of',
+      'explain this metric',
+      'what does it measure',
+      'how to interpret',
+      'look up a parameter',
+      'search for parameter',
+      'search for kpi',
+      'help me understand',
+      'what is the purpose of',
+      'describe this kpi',
+      'describe this parameter',
+      'parameter lookup',
+      'kpi lookup',
+      'technical definition',
+    ],
+  },
+];
+
+function extractSiteId(message: string): string | null {
+  // 0. Explicit UST-format IDs — highest priority, case-insensitive on raw message
+  const ustExplicit = message.match(/\b(UST\d{4,8})\b/i);
+  if (ustExplicit) return ustExplicit[1].toUpperCase();
+
+  // 1. Alphanumeric codes WITH digits (UST237369, NYC01, SITE_X1234, etc.)
+  const digitCodes = message.match(/\b([A-Z][A-Z0-9_]*[0-9][A-Z0-9_]*)\b/g);
+  if (digitCodes && digitCodes.length > 0) {
+    const lastCode = digitCodes[digitCodes.length - 1];
+    if (!['KPI', 'RCA', 'OSS', 'API'].includes(lastCode)) return lastCode;
+  }
+
+  // 2. Short uppercase letter-only codes (UXOA, NYC…)
+  const allCapsCodes = message.match(/\b([A-Z]{3,5})\b(?![\w\s]*[A-Z]{2,})/g);
+  if (allCapsCodes && allCapsCodes.length > 0) {
+    const candidate = allCapsCodes[allCapsCodes.length - 1];
+    if (!['KPI', 'RCA', 'OSS', 'API', 'URL', 'FOR', 'THE', 'AND', 'SITE', 'DATA'].includes(candidate)) return candidate;
+  }
+
+  // 3. Any multi-char uppercase code not in blacklist
+  const anyCode = message.match(/\b([A-Z][A-Z0-9_]{2,})\b(?!.*[A-Z]{2,})/);
+  if (anyCode) {
+    const candidate = anyCode[1];
+    if (!['KPI', 'RCA', 'OSS', 'API', 'URL', 'FOR', 'THE', 'AND', 'SITE', 'DATA'].includes(candidate)) return candidate;
+  }
+
+  // 4. Pure numeric USID: 4-6 digit standalone number that is not a calendar year
+  const allNums = [...message.matchAll(/\b(\d{4,6})\b/g)].map((m) => m[1]);
+  const usid = allNums.find((n) => {
+    if (n.length === 4) { const v = parseInt(n, 10); return v < 1900 || v > 2099; }
+    return true;
+  });
+  if (usid) return usid;
+
+  return null;
+}
+
+/**
+ * Extract layer keyword from query (outage, congestion, degraded, overutilized)
+ * Used for map visualization filtering
+ */
+function extractLayerKeyword(message: string): string | null {
+  const lower = message.toLowerCase();
+  if (lower.includes('outage')) return 'outage';
+  if (lower.includes('congestion')) return 'congestion';
+  if (lower.includes('degraded')) return 'degraded';
+  if (lower.includes('overutilized') || lower.includes('over-utiliz')) return 'overutilized';
+  return null;
+}
+
+export function classifyIntent(message: string): {
+  intent: NaavikIntent;
+  confidence: number;
+  metadata?: Record<string, any>;
+} {
+  const lower = message.toLowerCase();
+
+  for (const entry of INTENT_DICTIONARY) {
+    for (const phrase of entry.phrases) {
+      if (lower.includes(phrase)) {
+        const metadata: Record<string, any> = {};
+        if (entry.intent === 'kpi_request') {
+          const siteId = extractSiteId(message);
+          if (siteId) {
+            metadata.siteId = siteId;
+          }
+        }
+        if (entry.intent === 'site_health') {
+          const siteId = extractSiteId(message);
+          if (siteId) {
+            metadata.siteId = siteId;
+          }
+        }
+        if (entry.intent === 'map_view') {
+          const layer = extractLayerKeyword(message);
+          if (layer) {
+            metadata.layer = layer;
+          }
+        }
+        return { intent: entry.intent, confidence: 0.95, metadata };
+      }
+    }
+  }
+
+  return { intent: 'unmatched', confidence: 0 };
+}

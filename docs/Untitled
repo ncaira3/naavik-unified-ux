@@ -1,0 +1,14 @@
+Error [ERR_MODULE_NOT_FOUND]: Cannot find module '/Users/admin/nirmalc/Code/Naavik/naavik_mwc_demo/backend/src/services/naavik-db-connector.js' imported from /Users/admin/nirmalc/Code/Naavik/naavik_mwc_demo/backend/src/routes/offender.routes.ts
+    at finalizeResolution (node:internal/modules/esm/resolve:274:11)
+    at moduleResolve (node:internal/modules/esm/resolve:864:10)
+    at defaultResolve (node:internal/modules/esm/resolve:990:11)
+    at nextResolve (node:internal/modules/esm/hooks:748:28)
+    at resolveBase (file:///Users/admin/nirmalc/Code/Naavik/naavik_mwc_demo/backend/node_modules/tsx/dist/esm/index.mjs?1770940024852:2:3744)
+    at async resolveDirectory (file:///Users/admin/nirmalc/Code/Naavik/naavik_mwc_demo/backend/node_modules/tsx/dist/esm/index.mjs?1770940024852:2:4237)
+    at async resolve (file:///Users/admin/nirmalc/Code/Naavik/naavik_mwc_demo/backend/node_modules/tsx/dist/esm/index.mjs?1770940024852:2:5355)
+    at async nextResolve (node:internal/modules/esm/hooks:748:22)
+    at async Hooks.resolve (node:internal/modules/esm/hooks:240:24)
+    at async handleMessage (node:internal/modules/esm/worker:201:18) {
+  code: 'ERR_MODULE_NOT_FOUND',
+  url: 'file:///Users/admin/nirmalc/Code/Naavik/naavik_mwc_demo/backend/src/services/naavik-db-connector.js'
+}

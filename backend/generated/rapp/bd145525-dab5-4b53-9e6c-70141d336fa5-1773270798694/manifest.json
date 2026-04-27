@@ -1,0 +1,15 @@
+{
+  "name": "builder_bd145525da",
+  "version": "1.0.0",
+  "platform": "ERICSSON_EIAP",
+  "scenario": "prb_qrxlevmin_v1",
+  "entrypoint": "app.py",
+  "threadId": "bd145525-dab5-4b53-9e6c-70141d336fa5",
+  "generatedAt": "2026-03-11T23:13:18.702Z",
+  "artifacts": [
+    "app.py",
+    "requirements.txt",
+    "helm/",
+    "workflow.json"
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "version": "v1",
+  "scenarioType": "prb_qrxlevmin_v1",
+  "threadId": "f751f973-f0ec-4581-b43b-aaa18db5e997",
+  "nodes": [
+    {
+      "id": "start",
+      "type": "start",
+      "label": "Start",
+      "data": {
+        "scenarioType": "prb_qrxlevmin_v1"
+      }
+    },
+    {
+      "id": "condition",
+      "type": "condition",
+      "label": "IF RRC Fail > 2000%",
+      "data": {
+        "technology": "4G",
+        "kpi": "RRC Fail",
+        "operator": ">",
+        "threshold": 2000,
+        "unit": "%",
+        "granularity": "hourly"
+      }
+    },
+    {
+      "id": "selection",
+      "type": "selection",
+      "label": "Select cells (any 4G cell meeting threshold)",
+      "data": {
+        "technology": "4G",
+        "scope": "any 4G cell meeting threshold",
+        "criteria": "RRC Fail > 2000%"
+      }
+    },
+    {
+      "id": "action",
+      "type": "action",
+      "label": "set NeighborRelation.cellIndividualOffset by 0",
+      "data": {
+        "moClass": "NeighborRelation",
+        "parameter": "cellIndividualOffset",
+        "actionType": "set",
+        "actionValue": 0,
+        "safeMode": true
+      }
+    },
+    {
+      "id": "end",
+      "type": "end",
+      "label": "End",
+      "data": {
+        "outcome": "workflow + code generated"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1",
+      "source": "start",
+      "target": "condition"
+    },
+    {
+      "id": "e2",
+      "source": "condition",
+      "target": "selection",
+      "label": "true"
+    },
+    {
+      "id": "e3",
+      "source": "selection",
+      "target": "action"
+    },
+    {
+      "id": "e4",
+      "source": "action",
+      "target": "end"
+    }
+  ],
+  "metadata": {
+    "appContext": {
+      "appKind": "rApp",
+      "runtimeTarget": "EIAP",
+      "oem": "Ericsson",
+      "intentCategory": null,
+      "problemDescription": null
+    },
+    "canonical": {
+      "kpi": [
+        {
+          "name": "RRC Fail",
+          "operator": ">",
+          "threshold": 2000,
+          "unit": "count"
+        }
+      ],
+      "parameter": "cellIndividualOffset",
+      "moClass": "NeighborRelation",
+      "threshold": 2000,
+      "unit": "%",
+      "granularity": "hourly"
+    }
+  }
+}

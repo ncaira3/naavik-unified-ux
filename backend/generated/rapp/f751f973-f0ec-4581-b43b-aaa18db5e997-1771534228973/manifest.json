@@ -1,0 +1,15 @@
+{
+  "name": "builder_f751f973f0",
+  "version": "1.0.0",
+  "platform": "ERICSSON_ENM",
+  "scenario": "prb_qrxlevmin_v1",
+  "entrypoint": "app.py",
+  "threadId": "f751f973-f0ec-4581-b43b-aaa18db5e997",
+  "generatedAt": "2026-02-19T20:50:28.978Z",
+  "artifacts": [
+    "app.py",
+    "requirements.txt",
+    "helm/",
+    "workflow.json"
+  ]
+}

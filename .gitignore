@@ -1,0 +1,64 @@
+# ===== Secrets & credentials =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+credentials*
+secrets*
+.aws/
+
+# ===== Node / build artifacts =====
+node_modules/
+dist/
+dist-ssr/
+build/
+.next/
+.cache/
+coverage/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# ===== Logs =====
+logs/
+*.log
+
+# ===== Databases / dumps =====
+*.sqlite
+*.sqlite3
+*.db
+*.sql.gz
+
+# ===== OS / editor =====
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+*.suo
+*.sln
+
+# ===== Local-only artifacts =====
+*.local
+.tmp/
+tmp/
+
+# ===== Notebooks (use case-by-case) =====
+test.ipynb
+scratch.ipynb
+
+# ===== Claude Code per-user settings =====
+.claude/settings.local.json

@@ -1,0 +1,566 @@
+/* Chat panel — modern, clean aesthetic */
+
+.message {
+  animation: messageIn 0.3s ease-out;
+}
+
+@keyframes messageIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.live {
+  animation: livePulse 2s ease-in-out infinite;
+}
+
+@keyframes livePulse {
+  0%, 100% {
+    border-color: rgba(14, 165, 233, 0.35);
+    box-shadow: 0 0 0 0 rgba(14, 165, 233, 0.15);
+  }
+  50% {
+    border-color: rgba(14, 165, 233, 0.6);
+    box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.08);
+  }
+}
+
+.header {
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.inputWrap {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.inputWrap:focus-within {
+  border-color: #94a3b8;
+  box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.2);
+}
+
+/* Agent dropdown — modern pill trigger + popover list */
+.agentTrigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 2.25rem;
+  padding: 0.375rem 0.75rem 0.375rem 0.875rem;
+  border-radius: 9999px;
+  border: 1px solid #dbe4f0;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #0f172a;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+
+.agentTrigger:hover:not(:disabled) {
+  background: linear-gradient(180deg, #ffffff 0%, #f1f5f9 100%);
+  border-color: #bfdbfe;
+  box-shadow: 0 8px 22px rgba(14, 165, 233, 0.12);
+}
+
+.agentTrigger:focus {
+  outline: none;
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.16);
+}
+
+.agentTrigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.agentTriggerLabel {
+  white-space: nowrap;
+}
+
+.agentCompletedPill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  background: #dcfce7;
+  padding: 0.15rem 0.45rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #166534;
+}
+
+/* Outer shell: positioning only (position/left/top/transform set inline). No animation here so inline transform is not overridden. */
+.agentDropdownShell {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  width: min(360px, calc(100vw - 4rem));
+  max-height: min(70vh, 420px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 10000;
+}
+
+/* Portaled dropdown: fixed positioning, values come from inline style. */
+.agentDropdownShellPortaled {
+  position: fixed;
+  max-height: min(70vh, 420px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 2147483647;
+}
+
+/* Inner: visual look and entrance animation (does not affect outer positioning). */
+.agentDropdown {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid #dbe4f0;
+  border-radius: 20px;
+  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.18), 0 10px 24px rgba(15, 23, 42, 0.1);
+  animation: agentDropdownIn 0.15s ease-out;
+  backdrop-filter: blur(18px);
+}
+
+@keyframes agentDropdownIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.agentDropdownHeader {
+  flex-shrink: 0;
+  border-bottom: 1px solid #e2e8f0;
+  padding: 0.85rem 1rem 0.75rem;
+  background: linear-gradient(180deg, rgba(240, 249, 255, 0.9) 0%, rgba(255, 255, 255, 0.92) 100%);
+}
+
+.agentDropdownEyebrow {
+  margin: 0;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.agentDropdownTitle {
+  margin: 0.2rem 0 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.agentDropdownList {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0.5rem;
+}
+
+.agentOption {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.625rem;
+  width: 100%;
+  padding: 0.75rem 0.875rem;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #0f172a;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+
+.agentOption:hover {
+  background: #f8fafc;
+  box-shadow: inset 0 0 0 1px #e2e8f0;
+}
+
+.agentOptionActive {
+  background: linear-gradient(180deg, #eff6ff 0%, #f8fbff 100%);
+  box-shadow: inset 0 0 0 1px #bfdbfe;
+  color: #0c4a6e;
+}
+
+.agentOptionActive:hover {
+  background: linear-gradient(180deg, #e0f2fe 0%, #f0f9ff 100%);
+}
+
+.agentOptionCheck {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  margin-top: 0.1rem;
+  border-radius: 9999px;
+  background: #e2e8f0;
+  color: #ffffff;
+}
+
+.agentOptionActive .agentOptionCheck {
+  background: linear-gradient(180deg, #0ea5e9 0%, #2563eb 100%);
+}
+
+.agentOptionLabel {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: inherit;
+}
+
+.agentOptionDescription {
+  display: block;
+  margin-top: 0.2rem;
+  font-size: 0.6875rem;
+  line-height: 1.45;
+  color: #64748b;
+}
+
+.agentOptionBadge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  background: #ecfdf5;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.625rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #166534;
+}
+
+/* Avatars — soft, modern circles */
+.avatarUser {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(145deg, #64748b 0%, #475569 100%);
+  color: #f1f5f9;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.avatarAssistant {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(145deg, #e0f2fe 0%, #bae6fd 100%);
+  color: #0369a1;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+/* User message bubble — modern slate, not flat */
+.userBubble {
+  border-radius: 18px 18px 4px 18px;
+  padding: 12px 16px;
+  background: linear-gradient(160deg, #475569 0%, #334155 100%);
+  color: #f8fafc;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12), 0 1px 2px rgba(0, 0, 0, 0.06);
+  font-size: 0.9375rem;
+  line-height: 1.5;
+}
+
+/* Assistant message bubble — card-like, elevated; allow long paths/code to wrap */
+.assistantBubble {
+  border-radius: 18px 18px 18px 4px;
+  padding: 12px 16px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 4px 12px rgba(0, 0, 0, 0.03);
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+/* Constrain chat content so long paths/code wrap instead of overflowing */
+.chatMessageContent {
+  min-width: 0;
+}
+
+.chatMessageContent .markdown-body pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.chatMessageContent .markdown-body code {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.emptyStateIcon {
+  opacity: 0.5;
+}
+
+.connectionPill {
+  padding: 4px 10px;
+  border-radius: 9999px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.connectionPill.connected {
+  background: rgba(34, 197, 94, 0.12);
+  color: #15803d;
+}
+
+.connectionPill.disconnected {
+  background: rgba(239, 68, 68, 0.1);
+  color: #b91c1c;
+}
+
+/* Agent activity — modern collapsible card; min-width so it can shrink and wrap */
+.activityCard {
+  margin-bottom: 0.75rem;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  overflow: hidden;
+  transition: box-shadow 0.2s, border-color 0.2s;
+  min-width: 0;
+}
+
+.activityCard:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.activityCardLive {
+  border-color: rgba(14, 165, 233, 0.4);
+  box-shadow: 0 0 0 1px rgba(14, 165, 233, 0.15);
+}
+
+.activityCardClarification {
+  border-color: rgba(245, 158, 11, 0.35);
+  background: linear-gradient(to right, rgba(254, 243, 199, 0.4) 0%, #fff 12%);
+}
+
+.activityCardError {
+  border-color: rgba(239, 68, 68, 0.3);
+  background: linear-gradient(to right, rgba(254, 226, 226, 0.5) 0%, #fff 12%);
+}
+
+.activityCardComplete {
+  border-color: rgba(34, 197, 94, 0.3);
+  background: linear-gradient(to right, rgba(220, 252, 231, 0.4) 0%, #fff 12%);
+}
+
+.activityTrigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 10px 14px;
+  text-align: left;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  transition: background 0.15s;
+}
+
+.activityTrigger:hover {
+  background: #f8fafc;
+}
+
+.activityTriggerIcon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.activityTriggerIconLive {
+  color: #0284c7;
+}
+
+.activityTriggerIconClarification {
+  color: #d97706;
+}
+
+.activityTriggerIconComplete {
+  color: #16a34a;
+}
+
+.activityTriggerIconError {
+  color: #dc2626;
+}
+
+.activityTriggerIconDefault {
+  color: #64748b;
+}
+
+.activityTriggerLabel {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: #334155;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activityTriggerMeta {
+  font-size: 0.6875rem;
+  color: #64748b;
+  background: #f1f5f9;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-weight: 500;
+}
+
+.activityCurrentStep {
+  font-size: 0.75rem;
+  color: #64748b;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 1;
+}
+
+.activityBody {
+  padding: 0 14px 12px;
+  border-top: 1px solid #f1f5f9;
+  min-width: 0;
+}
+
+.activitySteps {
+  padding-top: 8px;
+  min-width: 0;
+}
+
+.activityLiveFooter {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-top: 10px;
+  margin-top: 8px;
+  border-top: 1px solid #f1f5f9;
+  font-size: 0.6875rem;
+  color: #64748b;
+}
+
+.activityDots {
+  display: flex;
+  gap: 4px;
+}
+
+.activityDot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #0ea5e9;
+  animation: activityDotBounce 0.6s ease-in-out infinite;
+}
+
+.activityDot:nth-child(2) { animation-delay: 0.1s; }
+.activityDot:nth-child(3) { animation-delay: 0.2s; }
+
+@keyframes activityDotBounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+/* Agent step — timeline-style row */
+.stepRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #f1f5f9;
+  font-size: 0.8125rem;
+}
+
+.stepRow:last-child {
+  border-bottom: none;
+}
+
+.stepIcon {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.stepBody {
+  flex: 1;
+  min-width: 0;
+}
+
+.stepLabel {
+  font-weight: 600;
+  font-size: 0.8125rem;
+}
+
+.stepContent {
+  margin-top: 4px;
+  font-size: 0.75rem;
+  color: #64748b;
+  line-height: 1.45;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+.stepExpand {
+  margin-top: 4px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  color: #0ea5e9;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+
+.stepExpand:hover {
+  text-decoration: underline;
+  color: #0284c7;
+}
