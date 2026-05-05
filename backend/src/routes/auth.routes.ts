@@ -11,23 +11,28 @@ import { asyncHandler, AppError } from '../middleware/errorHandler.js';
 
 const router = Router();
 
-// Admin credentials are pulled from env vars only.
-// The server refuses to start without them — never fall back to a hardcoded
-// password, which would otherwise end up in the source bundle / git history.
-if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) {
-  // Fail fast with a clear message so misconfiguration is obvious in dev.
-  throw new Error(
-    'ADMIN_USERNAME and ADMIN_PASSWORD must be set in the environment. ' +
-    'See backend/.env.example.'
-  );
-}
+// Lazy-initialized so that dotenv.config() in server.ts runs first (ESM imports
+// are hoisted before any module body executes, so module-level env reads fire
+// before dotenv has a chance to populate process.env).
+let _adminUser: { id: string; username: string; passwordHash: string; role: 'admin' } | null = null;
 
-const ADMIN_USER = {
-  id: 'admin-001',
-  username: process.env.ADMIN_USERNAME,
-  passwordHash: bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10),
-  role: 'admin' as const,
-};
+function getAdminUser() {
+  if (!_adminUser) {
+    if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) {
+      throw new Error(
+        'ADMIN_USERNAME and ADMIN_PASSWORD must be set in the environment. ' +
+        'See backend/.env.example.'
+      );
+    }
+    _adminUser = {
+      id: 'admin-001',
+      username: process.env.ADMIN_USERNAME,
+      passwordHash: bcrypt.hashSync(process.env.ADMIN_PASSWORD, 10),
+      role: 'admin' as const,
+    };
+  }
+  return _adminUser;
+}
 
 /**
  * POST /api/auth/login
@@ -40,13 +45,15 @@ router.post('/login', asyncHandler(async (req: Request, res: Response) => {
     throw new AppError(400, 'MISSING_CREDENTIALS', 'Username and password are required');
   }
 
+  const adminUser = getAdminUser();
+
   // Verify credentials
-  if (username !== ADMIN_USER.username) {
+  if (username !== adminUser.username) {
     logger.warn(`Failed login attempt for username: ${username}`);
     throw new AppError(401, 'INVALID_CREDENTIALS', 'Invalid username or password');
   }
 
-  const passwordValid = await bcrypt.compare(password, ADMIN_USER.passwordHash);
+  const passwordValid = await bcrypt.compare(password, adminUser.passwordHash);
   
   if (!passwordValid) {
     logger.warn(`Failed login attempt - invalid password for: ${username}`);
@@ -55,9 +62,9 @@ router.post('/login', asyncHandler(async (req: Request, res: Response) => {
 
   // Generate token
   const user: User = {
-    id: ADMIN_USER.id,
-    username: ADMIN_USER.username,
-    role: ADMIN_USER.role,
+    id: adminUser.id,
+    username: adminUser.username,
+    role: adminUser.role,
   };
 
   const token = generateToken(user);

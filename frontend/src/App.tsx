@@ -1,18 +1,24 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import AppSpaceLayout, { type AppSpaceView } from './components/AppSpaceLayout';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { ChatProvider } from './context/ChatContext';
 import { MapDataProvider } from './context/MapDataContext';
 import { DummifierProvider } from './context/DummifierContext';
+import { MarketProvider, useMarket } from './context/MarketContext';
 import { PlatformBusProvider, usePlatformBus } from './platform/PlatformBusContext';
 import { useAppRegistry } from './platform/useAppRegistry';
 import AppSlot from './platform/AppSlot';
 import LoginPage from './components/LoginPage';
+import MarketSelector from './components/MarketSelector';
+import { getDefaultLandingPage } from './config/defaultLandingPage';
 import api from './services/api';
 
 function AuthenticatedApp() {
-  const [activeView, setActiveView] = useState<AppSpaceView>('home');
+  // Initialize from the user's saved default landing page (Settings → Appearance).
+  // useState's lazy initializer reads localStorage exactly once on first mount,
+  // which lines up with login since this component is freshly created then.
+  const [activeView, setActiveView] = useState<AppSpaceView>(() => getDefaultLandingPage());
   const { registry } = useAppRegistry();
   const { subscribe } = usePlatformBus();
 
@@ -109,10 +115,39 @@ function AppBootstrap() {
 
   return (
     <ThemeProvider>
-      <PlatformBusProvider>
-        <AuthenticatedApp />
-      </PlatformBusProvider>
+      <MarketProvider>
+        <PlatformBusProvider>
+          <MarketGate>
+            <AuthenticatedApp />
+          </MarketGate>
+        </PlatformBusProvider>
+      </MarketProvider>
     </ThemeProvider>
+  );
+}
+
+/**
+ * Shows the MarketSelector modal as a blocking first-time prompt (no dismiss).
+ * Once a market is selected, renders children. After that, the same component
+ * renders the modal again whenever someone calls `promptForMarket()` from the
+ * header — but in dismissable mode.
+ */
+function MarketGate({ children }: { children: ReactNode }) {
+  const { ready, needsSelection, selectorOpen } = useMarket();
+
+  if (!ready) return null;
+
+  // First-time prompt: no children rendered yet, modal is non-dismissable.
+  if (needsSelection) {
+    return <MarketSelector dismissable={false} />;
+  }
+
+  // Subsequent switches: app renders normally; modal overlays on demand.
+  return (
+    <>
+      {children}
+      {selectorOpen && <MarketSelector dismissable />}
+    </>
   );
 }
 

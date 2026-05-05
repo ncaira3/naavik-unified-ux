@@ -36,6 +36,7 @@ import ossAdapterRoutes from './routes/oss-adapter.routes.js';
 import agentRoutes from './routes/agent.routes.js';
 import appgenAgentRoutes from './routes/appgen-agent.routes.js';
 import settingsRoutes from './routes/settings.routes.js';
+import mirrorRoutes from './routes/mirror.routes.js';
 import platformRoutes from './routes/platform.routes.js';
 import compassRoutes from './routes/compass.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
@@ -44,6 +45,7 @@ import { AppSettingsService } from './services/app-settings.service.js';
 import { PlatformRegistryService } from './services/platform-registry.service.js';
 import { dbSchemaRef } from './services/db-schema-reference.service.js';
 import { dataSyncService } from './services/data-sync.service.js';
+import { dbMirror } from './services/db-mirror/mirror.service.js';
 import { dataDictResolver } from './services/datadict-resolver.service.js';
 
 // Load environment variables
@@ -140,6 +142,7 @@ app.use('/api/oss-adapter', authenticateToken, ossAdapterRoutes);
 app.use('/api/agent', authenticateToken, agentRoutes);
 app.use('/api/appgen/agent', authenticateToken, appgenAgentRoutes);
 app.use('/api/settings', authenticateToken, settingsRoutes);
+app.use('/api/mirror', authenticateToken, mirrorRoutes);
 app.use('/api/platform', authenticateToken, platformRoutes);
 app.use('/api/compass', authenticateToken, compassRoutes);
 app.use('/api/analytics', authenticateToken, analyticsRoutes);
@@ -310,6 +313,15 @@ async function startServer() {
         dataSyncService.start();
       } catch (error) {
         logger.warn('Data sync service init failed — map will load from remote on first request.');
+      }
+
+      logger.info('Initializing DB mirror (offender slice → local Postgres)…');
+      try {
+        // Don't await — schema discovery is fast but the 30-day backfill
+        // (if any) runs in the background and shouldn't block server startup.
+        void dbMirror.start();
+      } catch (error) {
+        logger.warn('DB mirror init failed — offender data will load from remote on demand.', error);
       }
 
       logger.info('Loading DataDict parameter catalog…');

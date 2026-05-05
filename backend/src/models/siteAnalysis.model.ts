@@ -1,5 +1,6 @@
 import { NaavikDBConnector } from '../services/naavik-db-connector.service.js';
 import { siteIdMapper } from '../services/site-id-mapper.service.js';
+import { mirrorOrRemote } from '../services/db-mirror/lib/mirror-or-remote.js';
 import type {
   CellKpiResponse,
   CellKpiViewType,
@@ -84,15 +85,25 @@ export class SiteAnalysisModel {
     const realUsid = await resolveRealUsid(siteId);
     const effectiveDate = normalizeDate(dateId);
 
-    const query = `
-      SELECT TOP 1 *
-      FROM site_table WITH (NOLOCK)
-      WHERE CAST(USID AS VARCHAR(64)) = '${escapeSqlLiteral(realUsid)}'
-        AND CAST(DATE_ID AS DATE) <= CAST('${escapeSqlLiteral(effectiveDate)}' AS DATE)
-      ORDER BY CAST(DATE_ID AS DATE) DESC
-    `;
-
-    const rows = await remoteDbConnector.query(query);
+    // Mirror-first: ~50ms locally vs 10–30s on remote (the remote query has
+    // CAST(DATE_ID AS DATE) which forces a full scan + SELECT * pulls every
+    // multi-KB text column). Mirror returns the same row shape with lowercase
+    // column names — pickField() already handles both cases.
+    const rows = await mirrorOrRemote({
+      local: {
+        sql: `SELECT * FROM mirror.site_table
+              WHERE usid = $1 AND date_id::date <= $2::date
+              ORDER BY date_id DESC LIMIT 1`,
+        params: [realUsid, effectiveDate],
+      },
+      remote: `
+        SELECT TOP 1 *
+        FROM site_table WITH (NOLOCK)
+        WHERE CAST(USID AS VARCHAR(64)) = '${escapeSqlLiteral(realUsid)}'
+          AND DATE_ID <= '${escapeSqlLiteral(effectiveDate)}'
+        ORDER BY DATE_ID DESC`,
+      tag: 'getComprehensiveAnalysis',
+    });
     if (!rows.length) return null;
     const row = rows[0] as Record<string, unknown>;
 
@@ -187,14 +198,26 @@ export class SiteAnalysisModel {
   static async getCellTopology(siteId: string, dateId?: string): Promise<SiteTopologyPayload> {
     const realUsid = await resolveRealUsid(siteId);
     const effectiveDate = normalizeDate(dateId);
-    const query = `
-      SELECT cell_name, AZIMUTH, HEIGHT, LATITUDE, LONGITUDE, TECH, USEID, USID, CARRIER, DATE_ID
-      FROM cell_table WITH (NOLOCK)
-      WHERE CAST(USID AS VARCHAR(64)) = '${escapeSqlLiteral(realUsid)}'
-        AND CAST(DATE_ID AS DATE) = CAST('${escapeSqlLiteral(effectiveDate)}' AS DATE)
-      ORDER BY cell_name
-    `;
-    const rows = await remoteDbConnector.query(query);
+    const rows = await mirrorOrRemote({
+      local: {
+        sql: `SELECT cell_name, azimuth AS "AZIMUTH", height AS "HEIGHT",
+                     latitude AS "LATITUDE", longitude AS "LONGITUDE",
+                     tech AS "TECH", useid AS "USEID", usid AS "USID",
+                     carrier AS "CARRIER", date_id AS "DATE_ID"
+              FROM mirror.cell_table
+              WHERE usid = $1 AND date_id::date = $2::date
+              ORDER BY cell_name`,
+        params: [realUsid, effectiveDate],
+      },
+      remote: `
+        SELECT cell_name, AZIMUTH, HEIGHT, LATITUDE, LONGITUDE, TECH, USEID, USID, CARRIER, DATE_ID
+        FROM cell_table WITH (NOLOCK)
+        WHERE CAST(USID AS VARCHAR(64)) = '${escapeSqlLiteral(realUsid)}'
+          AND DATE_ID >= '${escapeSqlLiteral(effectiveDate)}'
+          AND DATE_ID < DATEADD(day, 1, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATETIME))
+        ORDER BY cell_name`,
+      tag: 'getCellTopology',
+    });
     const mapped: CellTopologyRow[] = rows.map((row: Record<string, unknown>) => ({
       cellName: String(pickField(row, ['cell_name', 'CELL_NAME']) || ''),
       azimuth: toNumber(pickField(row, ['AZIMUTH', 'azimuth'])),

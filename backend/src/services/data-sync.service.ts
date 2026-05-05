@@ -110,7 +110,7 @@ class DataSyncService {
     try {
       logger.info('DataSync: fetching site topology from remote MSSQL…');
 
-      // Try with CLUSTER_ID first; fall back to without if column is missing
+      // Try with CLUSTER_ID + MARKET first; fall back if columns are missing
       let rows: Record<string, unknown>[] = [];
       try {
         rows = await remoteDb.query(`
@@ -121,6 +121,7 @@ class DataSyncService {
             CAST(longitude AS FLOAT) AS longitude,
             CASE WHEN chain_of_thought IS NOT NULL THEN 1 ELSE 0 END AS is_offender,
             CAST(ISNULL(CLUSTER_ID, '') AS VARCHAR(128)) AS cluster_id,
+            CAST(ISNULL(MARKET, '') AS VARCHAR(64)) AS market,
             CAST(CAST(DATE_ID AS DATE) AS VARCHAR(10)) AS date_id
           FROM site_table WITH (NOLOCK)
           WHERE CAST(DATE_ID AS DATE) = (SELECT MAX(CAST(DATE_ID AS DATE)) FROM site_table WITH (NOLOCK))
@@ -137,6 +138,7 @@ class DataSyncService {
             CAST(longitude AS FLOAT) AS longitude,
             CASE WHEN chain_of_thought IS NOT NULL THEN 1 ELSE 0 END AS is_offender,
             '' AS cluster_id,
+            '' AS market,
             CAST(CAST(DATE_ID AS DATE) AS VARCHAR(10)) AS date_id
           FROM site_table WITH (NOLOCK)
           WHERE CAST(DATE_ID AS DATE) = (SELECT MAX(CAST(DATE_ID AS DATE)) FROM site_table WITH (NOLOCK))
@@ -303,7 +305,7 @@ class DataSyncService {
         const tuples: string[] = [];
         let p = 1;
         for (const row of batch) {
-          tuples.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`);
+          tuples.push(`($${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++},$${p++})`);
           values.push(
             pickStr(row, 'USID', 'usid'),
             pickStr(row, 'site_name', 'SITE_NAME'),
@@ -311,11 +313,12 @@ class DataSyncService {
             pickNum(row, 'longitude', 'LONGITUDE'),
             Boolean(Number(pickStr(row, 'is_offender'))),
             pickStr(row, 'cluster_id', 'CLUSTER_ID') || null,
+            pickStr(row, 'market', 'MARKET') || null,
             pickStr(row, 'date_id', 'DATE_ID').slice(0, 10) || null,
           );
         }
         await client.query(
-          `INSERT INTO topology_cache_sites (usid, site_name, latitude, longitude, is_offender, cluster_id, date_id)
+          `INSERT INTO topology_cache_sites (usid, site_name, latitude, longitude, is_offender, cluster_id, market, date_id)
            VALUES ${tuples.join(',')}`,
           values
         );
@@ -393,10 +396,13 @@ class DataSyncService {
         longitude     DOUBLE PRECISION,
         is_offender   BOOLEAN DEFAULT false,
         cluster_id    TEXT,
+        market        TEXT,
         date_id       TEXT,
         synced_at     TIMESTAMP DEFAULT NOW()
       )
     `);
+    // Backfill the column on pre-existing tables (safe no-op if it already exists).
+    await pool.query(`ALTER TABLE topology_cache_sites ADD COLUMN IF NOT EXISTS market TEXT`);
     await pool.query(`
       CREATE TABLE IF NOT EXISTS topology_cache_sectors (
         useid               TEXT PRIMARY KEY,

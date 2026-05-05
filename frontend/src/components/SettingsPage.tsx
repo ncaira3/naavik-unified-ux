@@ -17,9 +17,14 @@ import {
   Check,
   AlertCircle,
   MessageCircle,
+  Home,
+  Eye,
+  Code2,
+  LogIn,
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import FeedbackModal from './FeedbackModal';
+import { LANDING_OPTIONS, getDefaultLandingPage, setDefaultLandingPage } from '../config/defaultLandingPage';
 
 interface SettingsPageProps {
   isOpen: boolean;
@@ -53,6 +58,19 @@ export default function SettingsPage({
   const [_editingUser, _setEditingUser] = useState<User | null>(null);
   const [_showAddUserModal, setShowAddUserModal] = useState(false);
   const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
+  // Default landing page on login — persisted in localStorage via the helper.
+  const [defaultLanding, setDefaultLandingState] = useState<string>(() => getDefaultLandingPage());
+  const handleLandingChange = (viewId: string) => {
+    setDefaultLandingPage(viewId);
+    setDefaultLandingState(viewId);
+  };
+  // Map viewId → icon for the landing-page picker (kept in this file because
+  // the SettingsPage owns its visual style; the config file stays icon-free).
+  const LANDING_ICONS: Record<string, typeof Home> = {
+    home: Home,
+    observe: Eye,
+    appgen: Code2,
+  };
 
   // Mock users list
   const [users, setUsers] = useState<User[]>([
@@ -186,6 +204,45 @@ export default function SettingsPage({
                         )}
                       </button>
                     ))}
+                  </div>
+                </div>
+
+                {/* ── Default Landing Page on Login ────────────────────── */}
+                <div>
+                  <h2 className="text-lg font-semibold text-text-light-primary dark:text-text-primary mb-1 flex items-center gap-2">
+                    <LogIn className="w-4 h-4 text-naavik-primary" />
+                    Default Landing Page
+                  </h2>
+                  <p className="text-xs text-text-light-secondary dark:text-text-secondary mb-4">
+                    The page you'll see right after logging in. Saved per browser.
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    {LANDING_OPTIONS.map((opt) => {
+                      const Icon = LANDING_ICONS[opt.viewId] ?? Home;
+                      const isActive = defaultLanding === opt.viewId;
+                      return (
+                        <button
+                          key={opt.viewId}
+                          onClick={() => handleLandingChange(opt.viewId)}
+                          className={`p-4 rounded-lg border-2 transition text-left flex items-start gap-3 ${
+                            isActive
+                              ? 'border-naavik-primary bg-naavik-primary/10'
+                              : 'border-cream-border dark:border-pulse-border hover:border-naavik-primary/50'
+                          }`}
+                        >
+                          <Icon className="w-5 h-5 shrink-0 mt-0.5 text-naavik-primary" />
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium text-sm flex items-center gap-1.5">
+                              {opt.label}
+                              {isActive && <Check className="w-4 h-4 text-naavik-primary" />}
+                            </div>
+                            <div className="text-[11px] text-text-light-secondary dark:text-text-secondary mt-0.5 leading-snug">
+                              {opt.description}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 

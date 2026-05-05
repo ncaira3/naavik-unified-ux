@@ -175,6 +175,10 @@ export type UiBlockType =
   | 'copyable_text'
   | 'progress'
   | 'data_table'
+  | 'compact_table'
+  | 'diagnosis_card'
+  | 'severity_meter'
+  | 'topology_grid'
   | 'ranked_list'
   | 'pivot_table'
   | 'compare_table'
@@ -228,14 +232,18 @@ export type UiBlock =
   | (UiBlockBase & { type: 'callout'; data: { tone: 'info' | 'success' | 'warning' | 'error'; title?: string; text: string } })
   | (UiBlockBase & { type: 'chips'; data: { prompt?: string; chips: Array<{ label: string; value: string; description?: string }> } })
   | (UiBlockBase & { type: 'stat_row'; data: { items: Array<{ label: string; value: string; hint?: string }> } })
-  | (UiBlockBase & { type: 'data_table'; data: { title?: string; rows: Array<Record<string, any>>; rowTooltipField?: string } })
+  | (UiBlockBase & { type: 'data_table'; data: { title?: string; rows: Array<Record<string, any>>; rowTooltipField?: string; disableRowActions?: boolean } })
+  | (UiBlockBase & { type: 'compact_table'; data: { title?: string; subtitle?: string; rows: Array<Record<string, any>>; columnOrder?: string[]; columnHints?: Record<string, 'numeric' | 'text' | 'anomaly' | 'mono'>; maxHeight?: number } })
+  | (UiBlockBase & { type: 'diagnosis_card'; data: { synthesis: string; context?: string } })
+  | (UiBlockBase & { type: 'severity_meter'; data: { title?: string; subtitle?: string; rows: Array<{ label: string; value: number | null; anomaly?: boolean; prev?: number | null }>; max?: number; total?: { label: string; value: number; wow?: number } } })
+  | (UiBlockBase & { type: 'topology_grid'; data: { title?: string; subtitle?: string; cells: Array<{ cellName: string; tech?: string; carrier?: string; band?: string; azimuth?: number | null; height?: number | null; anomaly?: boolean; anomalyScore?: number | null }>; meta?: { siteName?: string; siteType?: string; cluster?: string; city?: string; state?: string } } })
   | (UiBlockBase & { type: 'ranked_list'; data: { title?: string; items: Array<{ title: string; subtitle?: string; value?: string; severity?: 'low' | 'med' | 'high'; trend?: number[] }> } })
   | (UiBlockBase & { type: 'section'; data: { description?: string; blocks: UiBlock[] } })
   | (UiBlockBase & { type: 'grid_layout'; data: { columns?: number; blocks: Array<{ span?: number; block: UiBlock }> } })
   | (UiBlockBase & { type: 'tabs'; data: { tabs: Array<{ id: string; label: string; blocks: UiBlock[] }> } })
   // Bridged blocks that reuse existing visualization rendering
   | (UiBlockBase & { type: 'map_inset'; data: Visualization['data'] })
-  | (UiBlockBase & { type: 'kpi_dashboard'; data: { siteId: string } })
+  | (UiBlockBase & { type: 'kpi_dashboard'; data: { siteId: string; kpiNames?: string[]; timeframe?: 'daily' | 'hourly'; daysBack?: number; endDate?: string; collapseAfterGroups?: number } })
   | (UiBlockBase & { type: 'rca_story'; data: any })
   | (UiBlockBase & { type: 'ticket_escalation'; data: any })
   | (UiBlockBase & { type: 'execution_status'; data: any })
@@ -675,7 +683,7 @@ export interface CqxResponse {
 }
 
 export interface KpiWorkbenchState {
-  topTab: 'site-kpi' | 'rca' | 'operational' | 'topology';
+  topTab: 'site-kpi' | 'rca' | 'operational' | 'topology' | 'analyzer';
   kpiTab: 'cqx' | 'daily' | 'hourly' | 'overlay' | 'timeline' | 'mobility' | 'outages' | 'traffic-profile';
   granularity: 'daily' | 'hourly';
   selectedKpis: string[];

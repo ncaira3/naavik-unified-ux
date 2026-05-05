@@ -29,12 +29,14 @@ import type {
 } from '../types';
 import { type RCAMapSignals } from './RCAReasoningPanel';
 import type { MapSite } from './MapView';
+import SiteAnalyzerTab from './SiteAnalyzerTab';
 
 const TOP_TABS: Array<{ id: KpiWorkbenchState['topTab']; label: string }> = [
   { id: 'site-kpi', label: 'Site KPI' },
   { id: 'rca', label: 'RCA' },
   { id: 'operational', label: 'Operational Info' },
   { id: 'topology', label: 'Site Topology' },
+  { id: 'analyzer', label: 'AI Analyzer' },
 ];
 
 const KPI_MENU_TABS: Array<{ id: KpiWorkbenchState['kpiTab']; label: string }> = [
@@ -2907,6 +2909,22 @@ export default function ObserveSiteAnalysisTile({
             </div>
             <TableView title="Cell topology" rows={displayedTopology.cellTopology as unknown as Array<Record<string, unknown>>} />
           </div>
+        ) : null}
+
+        {viewMode === 'diagnostic' && state.topTab === 'analyzer' ? (
+          <SiteAnalyzerTab
+            realSiteId={realSiteId}
+            selectedDateId={selectedDateId}
+            theme={theme}
+            tone={{
+              primary: tone.primary,
+              border: tone.border,
+              muted: tone.muted,
+              text: tone.text,
+              secondary: tone.secondary,
+              fill: tone.fill,
+            }}
+          />
         ) : null}
       </div>
 

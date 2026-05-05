@@ -969,13 +969,18 @@ class ApiService {
    *   localStorage.setItem('naavik:use-agent-v3', '1')
    * or the UI toggle in Settings.
    */
-  async agentV3Chat(payload: {
-    threadId?: string;
-    message: string;
-    currentView?: string;
-    stream?: string;
-  }) {
-    const response = await this.client.post<ApiResponse>('/agent/v3/chat', payload);
+  async agentV3Chat(
+    payload: {
+      threadId?: string;
+      message: string;
+      currentView?: string;
+      stream?: string;
+    },
+    options: { signal?: AbortSignal } = {},
+  ) {
+    const response = await this.client.post<ApiResponse>('/agent/v3/chat', payload, {
+      signal: options.signal,
+    });
     if (response.data.success && response.data.data) return response.data.data as any;
     throw new Error((response.data as any)?.error?.message || 'Agent v3 chat failed');
   }

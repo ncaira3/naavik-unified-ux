@@ -15,12 +15,14 @@ import {
   ChevronDown,
   Zap,
   Code2,
+  MapPin,
   LucideIcon,
 } from 'lucide-react';
 import api from '../services/api';
 import { useAuth } from '../context/AuthContext';
 import { useChat, type ChatStream } from '../context/ChatContext';
 import { useTheme } from '../context/ThemeContext';
+import { useMarket } from '../context/MarketContext';
 import type { AppRegistryEntry } from '../platform/types';
 import { getVisibleApps } from '../platform/appRegistry';
 import FeedbackModal from './FeedbackModal';
@@ -161,6 +163,7 @@ export default function AppLeftSidebar({
   const { theme } = useTheme();
   const { user, appPermissions } = useAuth();
   const { historyByStream } = useChat();
+  const { market, promptForMarket } = useMarket();
   const [expanded, setExpanded] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [isFeedbackOpen, setIsFeedbackOpen] = useState(false);
@@ -170,7 +173,7 @@ export default function AppLeftSidebar({
   const collapsedMenuRef = useRef<HTMLDivElement>(null);
   const closeMenuTimeoutRef = useRef<number | null>(null);
   const [collapsedMenuRect, setCollapsedMenuRect] = useState<{
-    top: number;
+    bottom: number;
     left: number;
   } | null>(null);
 
@@ -181,9 +184,10 @@ export default function AppLeftSidebar({
     (s) => (historyByStream[s.id] ?? []).some((m) => m.role === 'user')
   );
 
-  const visibleApps = getVisibleApps(registry, user, appPermissions).sort(
-    (a, b) => a.order - b.order
-  );
+  // Settings is moved into the profile dropdown — exclude it from the nav rail.
+  const visibleApps = getVisibleApps(registry, user, appPermissions)
+    .filter((app) => app.id !== 'settings')
+    .sort((a, b) => a.order - b.order);
   const displayName = user?.username || 'User';
   const displayInitial = displayName.charAt(0).toUpperCase() || 'U';
 
@@ -210,8 +214,10 @@ export default function AppLeftSidebar({
     if (!anchor) return;
     const updateRect = () => {
       const rect = anchor.getBoundingClientRect();
+      // Anchor the menu's BOTTOM near the bottom of the user button so it grows
+      // UPWARD as items are added — otherwise the menu falls below the viewport.
       setCollapsedMenuRect({
-        top: rect.bottom - 40,
+        bottom: window.innerHeight - rect.bottom,
         left: rect.right + 8,
       });
     };
@@ -295,12 +301,12 @@ export default function AppLeftSidebar({
               <button
                 type="button"
                 onClick={() => setExpanded(true)}
-                className="absolute right-0 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md transition-all duration-150 hover:scale-[0.95] active:scale-[0.90] text-slate-900 dark:text-white hover:text-black dark:hover:text-white"
+                className="absolute -right-1.5 top-1/2 -translate-y-1/2 flex h-6 w-6 items-center justify-center rounded-md text-slate-500/40 dark:text-white/30 transition-all duration-150 hover:text-slate-900 dark:hover:text-white hover:scale-[0.95] active:scale-[0.90]"
                 title="Expand sidebar"
                 aria-label="Expand sidebar"
                 aria-expanded={expanded}
               >
-                <ChevronRight className="h-5 w-5" strokeWidth={3} />
+                <ChevronRight className="h-4 w-4" strokeWidth={1.75} />
               </button>
             </div>
           )}
@@ -324,17 +330,6 @@ export default function AppLeftSidebar({
               </NavItemButton>
             );
           })}
-
-          <div className="my-1 border-t border-border dark:border-pulse-border" />
-
-          <NavItemButton
-            label="Feedback"
-            isActive={false}
-            expanded={expanded}
-            onClick={() => setIsFeedbackOpen(true)}
-          >
-            <MessageCircle className="h-[18px] w-[18px] shrink-0" strokeWidth={1.75} />
-          </NavItemButton>
 
           {/* Session history — only visible when sidebar is expanded and there are messages */}
           {expanded && activeStreamMeta.length > 0 && (
@@ -442,9 +437,38 @@ export default function AppLeftSidebar({
               className={`absolute z-50 overflow-hidden rounded-xl border bg-cream-surface py-1 shadow-xl dark:border-pulse-border dark:bg-pulse-surface border-border ${
                 expanded
                   ? 'bottom-full mb-1 left-2 right-2'
-                  : 'bottom-2 left-full ml-2 w-40'
+                  : 'bottom-2 left-full ml-2 w-44'
               }`}
             >
+              {/* Market */}
+              <button
+                type="button"
+                onClick={() => { setUserMenuOpen(false); promptForMarket(); }}
+                className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-primary hover:bg-slate-100 transition-colors duration-150 dark:hover:bg-pulse-surface-light"
+              >
+                <MapPin className="h-4 w-4 shrink-0 text-text-secondary" />
+                <span className="flex-1 truncate">Market</span>
+                <span className="text-[11px] truncate max-w-[110px] text-text-muted">{market?.label ?? '—'}</span>
+              </button>
+              {/* Settings */}
+              <button
+                type="button"
+                onClick={() => { setUserMenuOpen(false); onViewChange('settings'); }}
+                className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-primary hover:bg-slate-100 transition-colors duration-150 dark:hover:bg-pulse-surface-light"
+              >
+                <Settings className="h-4 w-4 shrink-0 text-text-secondary" />
+                Settings
+              </button>
+              {/* Feedback */}
+              <button
+                type="button"
+                onClick={() => { setUserMenuOpen(false); setIsFeedbackOpen(true); }}
+                className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-primary hover:bg-slate-100 transition-colors duration-150 dark:hover:bg-pulse-surface-light"
+              >
+                <MessageCircle className="h-4 w-4 shrink-0 text-text-secondary" />
+                Feedback
+              </button>
+              <div className="my-1 border-t border-border dark:border-pulse-border" />
               <button
                 type="button"
                 onClick={handleLogout}
@@ -463,12 +487,38 @@ export default function AppLeftSidebar({
           ref={collapsedMenuRef}
           onMouseEnter={openUserMenu}
           onMouseLeave={() => closeUserMenuWithDelay()}
-          className="fixed z-[1000] w-40 overflow-hidden rounded-xl border border-border bg-cream-surface py-1 shadow-xl dark:border-pulse-border dark:bg-pulse-surface"
+          className="fixed z-[1000] w-56 overflow-hidden rounded-xl border border-border bg-cream-surface py-1 shadow-xl dark:border-pulse-border dark:bg-pulse-surface"
           style={{
-            top: collapsedMenuRect.top,
+            bottom: collapsedMenuRect.bottom,
             left: collapsedMenuRect.left,
           }}
         >
+          <button
+            type="button"
+            onClick={() => { setUserMenuOpen(false); promptForMarket(); }}
+            className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-primary hover:bg-slate-100 transition-colors duration-150 dark:hover:bg-pulse-surface-light"
+          >
+            <MapPin className="h-4 w-4 shrink-0 text-text-secondary" />
+            <span className="flex-1 truncate">Market</span>
+            <span className="text-[10px] text-text-muted truncate max-w-[80px]">{market?.label ?? '—'}</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => { setUserMenuOpen(false); onViewChange('settings'); }}
+            className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-primary hover:bg-slate-100 transition-colors duration-150 dark:hover:bg-pulse-surface-light"
+          >
+            <Settings className="h-4 w-4 shrink-0 text-text-secondary" />
+            Settings
+          </button>
+          <button
+            type="button"
+            onClick={() => { setUserMenuOpen(false); setIsFeedbackOpen(true); }}
+            className="flex w-full items-center gap-2 px-3 py-2.5 text-left text-sm text-text-primary hover:bg-slate-100 transition-colors duration-150 dark:hover:bg-pulse-surface-light"
+          >
+            <MessageCircle className="h-4 w-4 shrink-0 text-text-secondary" />
+            Feedback
+          </button>
+          <div className="my-1 border-t border-border dark:border-pulse-border" />
           <button
             type="button"
             onClick={handleLogout}

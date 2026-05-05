@@ -6,6 +6,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { logger } from '../utils/logger.js';
 import { SQLQueries } from './sql-queries.js';
+import { pool } from '../config/database.js';
 
 export interface KPIDataPoint {
   USID: string;
@@ -93,7 +94,9 @@ export class NaavikDBConnector {
   }
 
   /**
-   * Fetch daily KPI data for a USID
+   * Fetch daily KPI data for a USID — mirror-first, remote fallback.
+   * The local mirror only contains offender USIDs; for non-offenders we
+   * silently fall back to the remote query (no caller-side change needed).
    */
   async fetchDailyKPIs(
     usid: string,
@@ -101,13 +104,31 @@ export class NaavikDBConnector {
     endDate: string,
     kpiNames: string[]
   ): Promise<KPIDataPoint[]> {
+    try {
+      const localResult = await pool.query(
+        `SELECT usid AS "USID",
+                to_char(date_id, 'YYYY-MM-DD"T"HH24:MI:SS') AS "DATE_ID",
+                cell_name, kpi_name, kpi_value
+         FROM mirror.intermediate_kpi_table
+         WHERE usid = $1
+           AND date_id >= $2::date
+           AND date_id <= ($3::date + INTERVAL '1 day')
+           AND kpi_name = ANY($4::text[])`,
+        [usid, startDate, endDate, kpiNames],
+      );
+      if (localResult.rows.length > 0) {
+        return localResult.rows as KPIDataPoint[];
+      }
+    } catch (err) {
+      logger.warn(`[mirror] fetchDailyKPIs local query failed, falling back to remote: ${(err as Error).message}`);
+    }
     const query = SQLQueries.getDailyCellKPIsForDateRange(usid, startDate, endDate, kpiNames);
     const result = await this.executeQuery(query);
     return result as KPIDataPoint[];
   }
 
   /**
-   * Fetch hourly KPI data for a USID
+   * Fetch hourly KPI data for a USID — mirror-first, remote fallback.
    */
   async fetchHourlyKPIs(
     usid: string,
@@ -115,6 +136,25 @@ export class NaavikDBConnector {
     endDate: string,
     kpiNames: string[]
   ): Promise<KPIDataPoint[]> {
+    try {
+      const localResult = await pool.query(
+        `SELECT usid AS "USID",
+                to_char(date_id, 'YYYY-MM-DD"T"HH24:MI:SS') AS "DATE_ID",
+                hour_id AS "HOUR_ID",
+                cell_name, kpi_name, kpi_value
+         FROM mirror.hourly_intermediate_kpis_table
+         WHERE usid = $1
+           AND date_id >= $2::date
+           AND date_id < ($3::date + INTERVAL '1 day')
+           AND kpi_name = ANY($4::text[])`,
+        [usid, startDate, endDate, kpiNames],
+      );
+      if (localResult.rows.length > 0) {
+        return localResult.rows as KPIDataPoint[];
+      }
+    } catch (err) {
+      logger.warn(`[mirror] fetchHourlyKPIs local query failed, falling back to remote: ${(err as Error).message}`);
+    }
     const query = SQLQueries.getHourlyCellKPIsForDateRange(usid, startDate, endDate, kpiNames);
     const result = await this.executeQuery(query);
     return result as KPIDataPoint[];

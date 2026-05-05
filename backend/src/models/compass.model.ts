@@ -1,6 +1,7 @@
 import { NaavikDBConnector } from '../services/naavik-db-connector.service.js';
 import { siteIdMapper } from '../services/site-id-mapper.service.js';
 import { pool } from '../config/database.js';
+import { mirrorOrRemote } from '../services/db-mirror/lib/mirror-or-remote.js';
 
 const remoteDbConnector = new NaavikDBConnector();
 const remoteTableColumnsCache = new Map<string, Set<string>>();
@@ -258,54 +259,105 @@ export class CompassModel {
   }> {
     const realUsid = await resolveRealUsid(siteId);
     const effectiveDate = normalizeDate(dateId);
-    const usidList = formatUsidList([realUsid]);
 
-    // Get neighbor USIDs first
-    const neighborQuery = `
-      SELECT DISTINCT NEIGH_USID
-      FROM neighbors_table_date_id
-      WHERE SOURCE_USID = '${escapeSqlLiteral(realUsid)}'
-      AND CAST(DATE_ID AS DATE) = '${escapeSqlLiteral(effectiveDate)}'
-    `;
-    const neighborRows = await remoteDbConnector.query(neighborQuery);
-    const neighborUsids = neighborRows.map((row) => String(pickField(row, ['NEIGH_USID', 'neigh_usid']) || ''));
+    // Get neighbor USIDs first — mirror-first.
+    const neighborRows = await mirrorOrRemote({
+      local: {
+        sql: `SELECT DISTINCT neigh_usid AS "NEIGH_USID"
+              FROM mirror.neighbors_table_date_id
+              WHERE source_usid = $1 AND date_id::date = $2::date`,
+        params: [realUsid, effectiveDate],
+      },
+      remote: `
+        SELECT DISTINCT NEIGH_USID
+        FROM neighbors_table_date_id
+        WHERE SOURCE_USID = '${escapeSqlLiteral(realUsid)}'
+        AND CAST(DATE_ID AS DATE) = '${escapeSqlLiteral(effectiveDate)}'`,
+      tag: 'getSiteOperational.neighbors',
+    });
+    const neighborUsids = neighborRows.map((row) => String(pickField(row, ['NEIGH_USID', 'neigh_usid']) || '')).filter(Boolean);
     const allUsids = [realUsid, ...neighborUsids];
     const usidListForOps = formatUsidList(allUsids);
 
-    // Run all operational queries in parallel
+    // Run all 5 operational queries in parallel — mirror-first per table.
     const [alarmRows, ticketRows, configRows, outageRows, eimRows] = await Promise.all([
-      remoteDbConnector.query(`
-        SELECT *
-        FROM alarm_table
-        WHERE USID IN ${usidListForOps}
-        AND CAST(LASTOCCURRENCE AS DATE) >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATE))
-      `),
-      remoteDbConnector.query(`
-        SELECT *
-        FROM ticket_table
-        WHERE USID IN ${usidListForOps}
-        AND CAST(CREATE_TIME AS DATE) >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATE))
-      `),
-      remoteDbConnector.query(`
-        SELECT *
-        FROM configuration_parameters_table
-        WHERE USID IN ${usidListForOps}
-        AND parameter_name NOT LIKE '%PHYSICALLAYERCELLID%'
-        AND parameter_name NOT LIKE '%PCI%'
-        AND CAST(DATE_ID AS DATE) >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATE))
-      `),
-      remoteDbConnector.query(`
-        SELECT *
-        FROM outage_table
-        WHERE USID IN ${usidListForOps}
-        AND CAST(DATE_ID AS DATE) >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATE))
-      `),
-      remoteDbConnector.query(`
-        SELECT *
-        FROM eim_table
-        WHERE USID IN ${usidListForOps}
-        AND CAST(DATE_ID AS DATE) >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATE))
-      `),
+      mirrorOrRemote({
+        local: {
+          sql: `SELECT * FROM mirror.alarm_table
+                WHERE usid = ANY($1::text[])
+                  AND lastoccurrence::date >= ($2::date - INTERVAL '7 days')`,
+          params: [allUsids, effectiveDate],
+        },
+        remote: `
+          SELECT *
+          FROM alarm_table
+          WHERE USID IN ${usidListForOps}
+          AND LASTOCCURRENCE >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATE))`,
+        tag: 'getSiteOperational.alarms',
+      }),
+      mirrorOrRemote({
+        local: {
+          sql: `SELECT * FROM mirror.ticket_table
+                WHERE usid = ANY($1::text[])
+                  AND create_time::date >= ($2::date - INTERVAL '7 days')`,
+          params: [allUsids, effectiveDate],
+        },
+        remote: `
+          SELECT *
+          FROM ticket_table
+          WHERE USID IN ${usidListForOps}
+          AND CREATE_TIME >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATE))`,
+        tag: 'getSiteOperational.tickets',
+      }),
+      mirrorOrRemote({
+        local: {
+          // Note: legacy remote SQL filtered on a non-existent column "parameter_name"
+          // (the actual column is "Parameter") — that filter returned zero rows by
+          // accident. Local mirror filters correctly on the lowercased "parameter".
+          sql: `SELECT * FROM mirror.configuration_parameters_table
+                WHERE usid = ANY($1::text[])
+                  AND parameter NOT ILIKE '%PHYSICALLAYERCELLID%'
+                  AND parameter NOT ILIKE '%PCI%'
+                  AND date_id::date >= ($2::date - INTERVAL '7 days')`,
+          params: [allUsids, effectiveDate],
+        },
+        remote: `
+          SELECT *
+          FROM configuration_parameters_table
+          WHERE USID IN ${usidListForOps}
+          AND parameter_name NOT LIKE '%PHYSICALLAYERCELLID%'
+          AND parameter_name NOT LIKE '%PCI%'
+          AND DATE_ID >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATETIME))`,
+        tag: 'getSiteOperational.config',
+      }),
+      mirrorOrRemote({
+        local: {
+          sql: `SELECT * FROM mirror.outage_table
+                WHERE usid = ANY($1::text[])
+                  AND date_id::date >= ($2::date - INTERVAL '7 days')`,
+          params: [allUsids, effectiveDate],
+        },
+        remote: `
+          SELECT *
+          FROM outage_table
+          WHERE USID IN ${usidListForOps}
+          AND DATE_ID >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATETIME))`,
+        tag: 'getSiteOperational.outages',
+      }),
+      mirrorOrRemote({
+        local: {
+          sql: `SELECT * FROM mirror.eim_table
+                WHERE usid = ANY($1::text[])
+                  AND date_id::date >= ($2::date - INTERVAL '7 days')`,
+          params: [allUsids, effectiveDate],
+        },
+        remote: `
+          SELECT *
+          FROM eim_table
+          WHERE USID IN ${usidListForOps}
+          AND DATE_ID >= DATEADD(day, -7, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATETIME))`,
+        tag: 'getSiteOperational.eim',
+      }),
     ]);
 
     return {
@@ -1464,15 +1516,27 @@ export class CompassModel {
   ): Promise<string[]> {
     const realUsid = await resolveRealUsid(siteId);
     const effectiveDate = normalizeDate(dateId);
-    const rows = await remoteDbConnector.query(`
-      SELECT DISTINCT
-        SUBSTRING(cell_name, 1, CHARINDEX('_', cell_name) - 1) AS node_name
-      FROM cell_table WITH (NOLOCK)
-      WHERE CAST(USID AS VARCHAR(64)) = '${escapeSqlLiteral(realUsid)}'
-        AND CAST(DATE_ID AS DATE) = '${escapeSqlLiteral(effectiveDate)}'
-        AND CHARINDEX('_', cell_name) > 0
-      ORDER BY node_name
-    `);
+    const rows = await mirrorOrRemote({
+      local: {
+        sql: `SELECT DISTINCT split_part(cell_name, '_', 1) AS node_name
+              FROM mirror.cell_table
+              WHERE usid = $1
+                AND date_id::date = $2::date
+                AND cell_name LIKE '%\\_%' ESCAPE '\\'
+              ORDER BY node_name`,
+        params: [realUsid, effectiveDate],
+      },
+      remote: `
+        SELECT DISTINCT
+          SUBSTRING(cell_name, 1, CHARINDEX('_', cell_name) - 1) AS node_name
+        FROM cell_table WITH (NOLOCK)
+        WHERE CAST(USID AS VARCHAR(64)) = '${escapeSqlLiteral(realUsid)}'
+          AND DATE_ID >= '${escapeSqlLiteral(effectiveDate)}'
+          AND DATE_ID < DATEADD(day, 1, CAST('${escapeSqlLiteral(effectiveDate)}' AS DATETIME))
+          AND CHARINDEX('_', cell_name) > 0
+        ORDER BY node_name`,
+      tag: 'getNodesForUsid',
+    });
     return (rows as Record<string, unknown>[])
       .map((r) => String(pickField(r, ['node_name']) || ''))
       .filter(Boolean);

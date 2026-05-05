@@ -6,7 +6,7 @@ import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import ReactECharts from 'echarts-for-react';
 import type { EChartsOption } from 'echarts';
 import {
-  BarChart2, Clock, Calendar, RefreshCw, ChevronDown,
+  BarChart2, Clock, Calendar, RefreshCw, ChevronDown, ChevronUp,
   AlertCircle, Loader2, X, Check, Bookmark, BookmarkCheck,
   Plus, ChevronRight, Users,
 } from 'lucide-react';
@@ -392,6 +392,12 @@ export interface ChatKpiDashboardProps {
   daysBack?: number;
   /** If provided, this is a saved dashboard with multiple possible USIDs */
   availableSiteIds?: string[];
+  /**
+   * When set, only the first N KPI groups render initially; an "Expand to show
+   * all KPIs" bar appears below them. Click to reveal the rest. Useful inside
+   * embedded contexts (e.g. the Analyzer) where vertical space is precious.
+   */
+  collapseAfterGroups?: number;
 }
 
 function yesterdayISO(): string {
@@ -674,15 +680,43 @@ function KpiSelector({ selected, onApply, onCancel, isDark }: {
 
 // ── Main component ────────────────────────────────────────────────────────────
 
+// Per-timeframe defaults when the caller doesn't pass an explicit daysBack.
+// Daily: 30 days of data; Hourly: 48 hours.
+const DEFAULT_DAILY_DAYS = 30;
+const DEFAULT_HOURLY_HOURS = 48;
+const DAILY_OPTIONS = [7, 14, 30, 60, 90];
+const HOURLY_OPTIONS = [24, 48, 72];
+const defaultDaysBackFor = (tf: 'daily' | 'hourly') =>
+  tf === 'hourly' ? DEFAULT_HOURLY_HOURS : DEFAULT_DAILY_DAYS;
+
+/**
+ * Snap an incoming daysBack to a valid picker option for the given timeframe.
+ * Without this, an unmatched value (e.g. a legacy `21` from saved dashboards
+ * or chat-intent fallbacks) leaves the <select> showing the first option (7d
+ * for daily / 24h for hourly) — confusing for users since the displayed value
+ * doesn't match the underlying state.
+ */
+const snapDaysBack = (value: number, tf: 'daily' | 'hourly'): number => {
+  const opts = tf === 'hourly' ? HOURLY_OPTIONS : DAILY_OPTIONS;
+  if (opts.includes(value)) return value;
+  // Pick the closest valid option (ties → larger window).
+  return opts.reduce((best, opt) =>
+    Math.abs(opt - value) < Math.abs(best - value) ? opt : best,
+    opts[0]);
+};
+
 export default function ChatKpiDashboard({
   siteId: initialSiteId,
   endDate: endDateProp,
   kpiNames: initialKpiNames,
   timeframe: initialTimeframe,
-  daysBack: initialDaysBack = 21,
+  daysBack: initialDaysBack,
   availableSiteIds,
+  collapseAfterGroups,
 }: ChatKpiDashboardProps) {
   const endDate = endDateProp || yesterdayISO();
+  // Collapsible mode: only the first N groups render until user expands.
+  const [groupsExpanded, setGroupsExpanded] = useState(false);
   const { theme } = useTheme();
   const isDark = theme === 'dark';
   const { saveDashboard } = useSavedDashboards();
@@ -691,7 +725,12 @@ export default function ChatKpiDashboard({
   const [activeSiteId, setActiveSiteId] = useState(initialSiteId);
   const [usidInput, setUsidInput] = useState(initialSiteId);
   const [timeframe, setTimeframe] = useState<'daily' | 'hourly'>(initialTimeframe);
-  const [daysBack, setDaysBack] = useState(initialDaysBack);
+  // daysBack defaults are timeframe-aware: 30 for daily, 48 for hourly.
+  // Caller can still override via initialDaysBack — but we snap that value to
+  // the nearest valid picker option so the <select> always reflects state.
+  const [daysBack, setDaysBack] = useState<number>(
+    snapDaysBack(initialDaysBack ?? defaultDaysBackFor(initialTimeframe), initialTimeframe),
+  );
 
   // Keep usidInput in sync if activeSiteId changes externally
   useEffect(() => { setUsidInput(activeSiteId); }, [activeSiteId]);
@@ -827,8 +866,10 @@ export default function ChatKpiDashboard({
               return (
                 <button key={tf} onClick={() => {
                   setTimeframe(tf);
-                  if (tf === 'hourly' && daysBack > 72) setDaysBack(48);
-                  if (tf === 'daily' && daysBack <= 72) setDaysBack(initialDaysBack >= 7 ? initialDaysBack : 30);
+                  // Snap to the nearest valid option for the new mode so the
+                  // <select> always shows a value that matches its options.
+                  const opts = tf === 'hourly' ? HOURLY_OPTIONS : DAILY_OPTIONS;
+                  if (!opts.includes(daysBack)) setDaysBack(defaultDaysBackFor(tf));
                 }}
                   className="flex items-center gap-1 px-3 py-1.5 text-[11px] font-semibold transition-colors"
                   style={{
@@ -900,36 +941,81 @@ export default function ChatKpiDashboard({
         </div>
       ) : (
         <div className="p-4 space-y-6">
-          {shownGroups.map((group) => (
-            <div key={group.group}>
-              {/* Section header */}
-              <div className="flex items-center gap-3 mb-4">
-                <span className="text-[10px] font-bold uppercase tracking-[0.12em] flex-shrink-0"
-                  style={{ color: textSecondary }}>
-                  {group.group}
-                </span>
-                <span className="flex-1 h-px"
-                  style={{ background: isDark ? 'rgba(255,255,255,0.09)' : 'rgba(45,42,38,0.12)' }} />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                {group.kpis.map((kpi, i) => {
-                  const kpiRows = rows.filter((r) => r.kpiName === kpi.name);
-                  const kpiIndex = ALL_STANDARD_KPIS.findIndex((k) => k.name === kpi.name);
-                  const option = buildKpiOption(kpiRows, kpi.name, kpiIndex >= 0 ? kpiIndex : i, timeframe, theme, kpi.unit);
-                  return (
-                    <ChartPanel
-                      key={kpi.name}
-                      title={kpi.label}
-                      option={option}
-                      unit={kpi.unit}
-                      height={280}
-                      loading={loading}
-                    />
-                  );
-                })}
-              </div>
-            </div>
-          ))}
+          {(() => {
+            const limit = collapseAfterGroups && !groupsExpanded ? collapseAfterGroups : shownGroups.length;
+            const visible = shownGroups.slice(0, limit);
+            const hiddenCount = Math.max(0, shownGroups.length - limit);
+            const hiddenChartCount = shownGroups.slice(limit).reduce((n, g) => n + g.kpis.length, 0);
+            return (
+              <>
+                {visible.map((group) => (
+                  <div key={group.group}>
+                    <div className="flex items-center gap-3 mb-4">
+                      <span className="text-[10px] font-bold uppercase tracking-[0.12em] flex-shrink-0"
+                        style={{ color: textSecondary }}>
+                        {group.group}
+                      </span>
+                      <span className="flex-1 h-px"
+                        style={{ background: isDark ? 'rgba(255,255,255,0.09)' : 'rgba(45,42,38,0.12)' }} />
+                    </div>
+                    <div className="grid grid-cols-2 gap-4">
+                      {group.kpis.map((kpi, i) => {
+                        const kpiRows = rows.filter((r) => r.kpiName === kpi.name);
+                        const kpiIndex = ALL_STANDARD_KPIS.findIndex((k) => k.name === kpi.name);
+                        const option = buildKpiOption(kpiRows, kpi.name, kpiIndex >= 0 ? kpiIndex : i, timeframe, theme, kpi.unit);
+                        return (
+                          <ChartPanel
+                            key={kpi.name}
+                            title={kpi.label}
+                            option={option}
+                            unit={kpi.unit}
+                            height={280}
+                            loading={loading}
+                          />
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Expand bar — only when collapseAfterGroups is set and there's more to show */}
+                {hiddenCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setGroupsExpanded(true)}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl border border-dashed py-3 text-[12px] font-semibold uppercase tracking-[0.10em] transition-colors hover:opacity-80"
+                    style={{
+                      borderColor: isDark ? 'rgba(255,255,255,0.18)' : 'rgba(45,42,38,0.18)',
+                      color: textSecondary,
+                      background: isDark ? 'rgba(255,255,255,0.02)' : 'rgba(45,42,38,0.02)',
+                    }}
+                  >
+                    <ChevronDown className="h-4 w-4" />
+                    Show {hiddenChartCount} more KPI{hiddenChartCount === 1 ? '' : 's'}
+                    <span className="font-mono normal-case opacity-60">
+                      ({hiddenCount} group{hiddenCount === 1 ? '' : 's'})
+                    </span>
+                  </button>
+                )}
+
+                {/* Collapse bar — appears when expanded so users can re-collapse */}
+                {collapseAfterGroups && groupsExpanded && shownGroups.length > collapseAfterGroups && (
+                  <button
+                    type="button"
+                    onClick={() => setGroupsExpanded(false)}
+                    className="w-full flex items-center justify-center gap-2 rounded-xl border border-dashed py-2.5 text-[11px] font-semibold uppercase tracking-[0.10em] transition-colors hover:opacity-80"
+                    style={{
+                      borderColor: isDark ? 'rgba(255,255,255,0.14)' : 'rgba(45,42,38,0.14)',
+                      color: textSecondary,
+                    }}
+                  >
+                    <ChevronUp className="h-4 w-4" />
+                    Collapse
+                  </button>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 

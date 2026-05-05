@@ -8,6 +8,10 @@ import RcaReportCard from './RcaReportCard';
 import TicketEscalationCard from '../Chat/ReportComponents/TicketEscalationCard';
 import { WorkflowExecutionStatus } from '../Chat/ReportComponents/WorkflowExecutionStatus';
 import ChatKpiDashboard from '../Chat/ReportComponents/ChatKpiDashboard';
+import CompactTable from './CompactTable';
+import DiagnosisCard from './DiagnosisCard';
+import SeverityMeter from './SeverityMeter';
+import TopologyGrid from './TopologyGrid';
 import InsightChartCard from '../Chat/ReportComponents/InsightChartCard';
 
 function extractText(raw: unknown): string {
@@ -239,13 +243,55 @@ function UiBlockRenderer({ block }: { block: UiBlock }) {
     return <StatRow items={block.data.items} />;
   }
   if (block.type === 'data_table') {
-    const handleRowAction = (action: string, row: Record<string, any>) => {
-      if (action === 'explain-rca') {
-        const siteId = row.USID || row.Site || row['Site ID'] || row['siteId'] || '';
-        if (siteId) emitChip(`Explain RCA for site ${siteId}`);
-      }
-    };
+    // Skip the per-row "Explain RCA" button when the producer flagged the table as
+    // single-USID context (parameter changes, topology, RET, etc.) — Explain only
+    // makes sense when the table lists multiple sites the user might investigate.
+    const disableRowActions = Boolean(block.data?.disableRowActions);
+    const handleRowAction = disableRowActions
+      ? undefined
+      : (action: string, row: Record<string, any>) => {
+          if (action === 'explain-rca') {
+            const siteId = row.USID || row.Site || row['Site ID'] || row['siteId'] || '';
+            if (siteId) emitChip(`Explain RCA for site ${siteId}`);
+          }
+        };
     return <InteractiveGridTable title={block.data.title || block.title || 'Table'} rows={block.data.rows} showSelection={false} rowTooltipField={block.data.rowTooltipField} onRowAction={handleRowAction} />;
+  }
+  if (block.type === 'compact_table') {
+    return (
+      <CompactTable
+        title={block.data.title || block.title}
+        subtitle={block.data.subtitle}
+        rows={block.data.rows}
+        columnOrder={block.data.columnOrder}
+        columnHints={block.data.columnHints}
+        maxHeight={block.data.maxHeight}
+      />
+    );
+  }
+  if (block.type === 'diagnosis_card') {
+    return <DiagnosisCard synthesis={block.data.synthesis} context={block.data.context} />;
+  }
+  if (block.type === 'severity_meter') {
+    return (
+      <SeverityMeter
+        title={block.data.title || block.title}
+        subtitle={block.data.subtitle}
+        rows={block.data.rows}
+        max={block.data.max}
+        total={block.data.total}
+      />
+    );
+  }
+  if (block.type === 'topology_grid') {
+    return (
+      <TopologyGrid
+        title={block.data.title || block.title}
+        subtitle={block.data.subtitle}
+        cells={block.data.cells}
+        meta={block.data.meta}
+      />
+    );
   }
   if (block.type === 'ranked_list') {
     const handleRankedAction = (action: string, row: any) => {
@@ -290,6 +336,7 @@ function UiBlockRenderer({ block }: { block: UiBlock }) {
         timeframe={d.timeframe ?? 'daily'}
         daysBack={d.daysBack ?? 30}
         endDate={d.endDate}
+        collapseAfterGroups={d.collapseAfterGroups}
       />
     );
   }
@@ -302,12 +349,50 @@ function UiBlockRenderer({ block }: { block: UiBlock }) {
   return null;
 }
 
+/**
+ * Group adjacent `compact_table` blocks into 2-column rows so the page reads
+ * denser. Other block types render full-width. A compact table is "pairable"
+ * if it has a small column count (≤ 4) and ≤ 30 rows — wider/longer tables
+ * keep their full width so they remain readable.
+ */
+function isPairableCompactTable(block: UiBlock): boolean {
+  if (block.type !== 'compact_table') return false;
+  const rows: any[] = (block.data as any)?.rows || [];
+  if (!rows.length) return true;
+  const cols = (block.data as any)?.columnOrder || Object.keys(rows[0] || {}).filter((k) => !k.startsWith('__'));
+  return rows.length <= 30 && cols.length <= 4;
+}
+
 export default function UiBlocksRenderer({ blocks }: { blocks: UiBlock[] }) {
+  // Walk the blocks list and emit either:
+  //  - a single full-width block, or
+  //  - a 2-col row when two pairable compact tables are adjacent
+  const grouped: Array<{ kind: 'single'; block: UiBlock } | { kind: 'pair'; blocks: [UiBlock, UiBlock] }> = [];
+  for (let i = 0; i < blocks.length; i++) {
+    const cur = blocks[i];
+    const next = blocks[i + 1];
+    if (cur && next && isPairableCompactTable(cur) && isPairableCompactTable(next)) {
+      grouped.push({ kind: 'pair', blocks: [cur, next] });
+      i += 1;
+    } else {
+      grouped.push({ kind: 'single', block: cur });
+    }
+  }
   return (
     <div className="space-y-3">
-      {blocks.map((b, idx) => (
-        <UiBlockRenderer key={b.id || `${b.type}_${idx}`} block={b} />
-      ))}
+      {grouped.map((g, idx) => {
+        if (g.kind === 'pair') {
+          return (
+            <div key={`pair_${idx}`} className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {g.blocks.map((b, j) => (
+                <UiBlockRenderer key={b.id || `${b.type}_${idx}_${j}`} block={b} />
+              ))}
+            </div>
+          );
+        }
+        const b = g.block;
+        return <UiBlockRenderer key={b.id || `${b.type}_${idx}`} block={b} />;
+      })}
     </div>
   );
 }

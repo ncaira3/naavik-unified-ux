@@ -16,6 +16,7 @@ import { ChartGeneratorService } from './chart-generator.service.js';
 import { openai } from '../config/openai.js';
 import { dbSchemaRef } from './db-schema-reference.service.js';
 import { dataDictResolver } from './datadict-resolver.service.js';
+import { mirrorOrRemote } from './db-mirror/lib/mirror-or-remote.js';
 
 // Shared remote DB connector for all data-query tools
 const remoteDb = new NaavikDBConnector();
@@ -32,7 +33,8 @@ export type UiCommandType =
   | 'map_fit_bounds' | 'map_highlight_set' | 'set_filters';
 
 export type UiBlockType =
-  | 'text' | 'callout' | 'chips' | 'stat_row' | 'data_table'
+  | 'text' | 'callout' | 'chips' | 'stat_row' | 'data_table' | 'compact_table'
+  | 'diagnosis_card' | 'severity_meter' | 'topology_grid'
   | 'ranked_list' | 'kpi_dashboard' | 'rca_story' | 'rca_summary' | 'map_inset'
   | 'insight_chart' | 'tabs' | 'grid_layout';
 
@@ -85,6 +87,38 @@ function sanitizeSiteId(id: string): string {
 
 function sanitizeDate(d: string): string {
   return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : todayMinus(3);
+}
+
+/** Days between two YYYY-MM-DD dates (positive if end > start). */
+function daysBetween(start: string, end: string): number {
+  const s = new Date(start).getTime();
+  const e = new Date(end).getTime();
+  if (!isFinite(s) || !isFinite(e)) return 0;
+  return Math.round((e - s) / 86_400_000);
+}
+
+/** Clamp a date range so endDate is no more than maxDays after startDate (and not before it). */
+function clampDateRange(startDate: string, endDate: string, maxDays: number): { startDate: string; endDate: string } {
+  const start = sanitizeDate(startDate);
+  let end = sanitizeDate(endDate);
+  // If end < start, reset end to start
+  if (daysBetween(start, end) < 0) end = start;
+  // If span too wide, push start forward to maxDays before end
+  if (daysBetween(start, end) > maxDays) {
+    const newStart = new Date(end);
+    newStart.setDate(newStart.getDate() - maxDays);
+    return { startDate: newStart.toISOString().slice(0, 10), endDate: end };
+  }
+  return { startDate: start, endDate: end };
+}
+
+/** Sanitize and cap an array of KPI names. */
+function sanitizeKpiList(input: unknown, fallback: string[], maxItems = 8): string[] {
+  const arr = Array.isArray(input) && input.length ? (input as unknown[]) : fallback;
+  return arr
+    .map((k) => String(k).replace(/[^A-Za-z0-9_]/g, '').slice(0, 60))
+    .filter(Boolean)
+    .slice(0, maxItems);
 }
 
 /** Try fn(dateId) stepping one day back at a time until rows are returned or maxTries exhausted. */
@@ -1191,6 +1225,1177 @@ const tool_resolve_kpi_param: AgentTool = {
   },
 };
 
+// ─── Site-analysis tools (Tools 1–10) ────────────────────────────────────────
+
+/** Helper: derive band label from CARRIER + TECH strings */
+function deriveBand(carrier: string, tech: string): string {
+  const c = String(carrier || '').toUpperCase();
+  const t = String(tech || '').toUpperCase();
+  if (t === '5G') {
+    if (/mmW|28G|39G|37G/i.test(c)) return '5G mmWave';
+    if (/n77|n78|C.?BAND|3\.5/i.test(c)) return '5G C-Band (midband)';
+    return '5G NR';
+  }
+  if (/700|_1_|^1_/.test(c)) return '4G Lowband 700';
+  if (/1900|_9_|^9_/.test(c)) return '4G PCS 1900 (midband)';
+  if (/AWS|1700|_5_|^5_/.test(c)) return '4G AWS (midband)';
+  if (/850|_3_|^3_/.test(c)) return '4G CLR 850';
+  return `${t || '4G'} ${carrier}`;
+}
+
+/** Tool 1 — Full cell/band/sector inventory for a USID */
+const tool_get_site_topology: AgentTool = {
+  name: 'get_site_topology',
+  description:
+    'Get the complete cell inventory for a site (USID): all cells, their technology (4G/5G), ' +
+    'carrier/band (lowband, PCS, AWS, C-band, mmWave), azimuth, height, and anomaly status. ' +
+    'Also returns site-level metadata: name, structure type, cluster, coordinates. ' +
+    'Use as the first step in any site investigation to understand what the site looks like.',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Site USID.' },
+      date: { type: 'string', description: 'Date YYYY-MM-DD. Defaults to 3 days ago.' },
+    },
+    required: ['usid'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    if (!usid) return { llmText: 'usid is required.' };
+    const startDate = sanitizeDate(String(args.date || todayMinus(3)));
+
+    const found = await withDateFallback(async (dateId) => {
+      const [cellRows, siteRows] = await Promise.all([
+        // Bounded by (USID, single DATE_ID) — naturally yields one row per cell on that day.
+        mirrorOrRemote({
+          local: {
+            sql: `SELECT cell_name,
+                         tech AS "TECH",
+                         carrier AS "CARRIER",
+                         useid AS "USEID",
+                         azimuth AS "AZIMUTH",
+                         height AS "HEIGHT",
+                         anomaly_flag, anomaly_score
+                  FROM mirror.cell_table
+                  WHERE usid = $1 AND date_id::date = $2::date
+                  ORDER BY cell_name`,
+            params: [usid, dateId],
+          },
+          remote: `
+            SELECT cell_name, TECH, CARRIER, USEID, AZIMUTH, HEIGHT, anomaly_flag, anomaly_score
+            FROM cell_table WITH (NOLOCK)
+            WHERE USID = '${usid}' AND CAST(DATE_ID AS DATE) = CAST('${dateId}' AS DATE)
+            ORDER BY cell_name`,
+          tag: 'get_site_topology.cells',
+        }),
+        mirrorOrRemote({
+          local: {
+            sql: `SELECT site_name,
+                         site_type AS "SITE_TYPE",
+                         structure_tower_type AS "STRUCTURE_TOWER_TYPE",
+                         latitude AS "LATITUDE",
+                         longitude AS "LONGITUDE",
+                         cell_num,
+                         clusterid AS "CLUSTERID",
+                         clustername AS "CLUSTERNAME",
+                         city AS "CITY",
+                         state AS "STATE"
+                  FROM mirror.site_table
+                  WHERE usid = $1 AND date_id::date = $2::date
+                  LIMIT 1`,
+            params: [usid, dateId],
+          },
+          remote: `
+            SELECT TOP 1 site_name, SITE_TYPE, STRUCTURE_TOWER_TYPE, LATITUDE, LONGITUDE,
+              cell_num, CLUSTERID, CLUSTERNAME, CITY, STATE
+            FROM site_table WITH (NOLOCK)
+            WHERE USID = '${usid}' AND CAST(DATE_ID AS DATE) = CAST('${dateId}' AS DATE)`,
+          tag: 'get_site_topology.site',
+        }),
+      ]);
+      return cellRows.length ? [{ cellRows, siteRows }] : [];
+    }, startDate);
+
+    if (!found) return { llmText: `No topology data found for USID ${usid} near ${startDate}.` };
+    const { cellRows, siteRows } = (found.rows[0] as any);
+    const site = siteRows[0] || {};
+
+    const bands = new Set<string>();
+    const tiles = cellRows.map((r: any) => {
+      const band = deriveBand(String(r.CARRIER || ''), String(r.TECH || ''));
+      bands.add(band);
+      return {
+        cellName: String(r.cell_name || '—'),
+        tech: String(r.TECH || ''),
+        carrier: String(r.CARRIER || ''),
+        band,
+        azimuth: r.AZIMUTH != null ? Number(r.AZIMUTH) : null,
+        height: r.HEIGHT != null ? Number(r.HEIGHT) : null,
+        anomaly: Boolean(r.anomaly_flag),
+        anomalyScore: r.anomaly_score != null ? Number(r.anomaly_score) : null,
+      };
+    });
+
+    const bandsStr = [...bands].join(', ') || 'unknown';
+    const anomalousCells = cellRows.filter((r: any) => r.anomaly_flag).length;
+    const llmText = clampString(
+      `USID ${usid} · ${site.site_name || '?'} · ${site.CITY || ''}, ${site.STATE || ''}\n` +
+      `Structure: ${site.SITE_TYPE || '?'} / ${site.STRUCTURE_TOWER_TYPE || '?'}\n` +
+      `Cluster: ${site.CLUSTERID || '?'} (${site.CLUSTERNAME || '?'})\n` +
+      `Cells: ${cellRows.length} | Bands: ${bandsStr}\n` +
+      `Anomalous cells: ${anomalousCells}/${cellRows.length}\n` +
+      tiles.map((t: any) => `• ${t.cellName}: ${t.tech} ${t.band} Az=${t.azimuth ?? '—'}° ${t.anomaly ? '⚠' : ''}`).join('\n'),
+    );
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'topology_grid',
+        title: `Topology · USID ${usid} · ${found.dateId}`,
+        data: {
+          title: `Cell Inventory — USID ${usid}`,
+          subtitle: found.dateId,
+          cells: tiles,
+          meta: {
+            siteName: String(site.site_name || ''),
+            siteType: [site.SITE_TYPE, site.STRUCTURE_TOWER_TYPE].filter(Boolean).join(' / '),
+            cluster: String(site.CLUSTERID || ''),
+            city: String(site.CITY || ''),
+            state: String(site.STATE || ''),
+          },
+        },
+      },
+    };
+  },
+};
+
+/** Tool 2 — Configuration parameter changes (Old→New) for a USID */
+const tool_get_config_changes: AgentTool = {
+  name: 'get_config_changes',
+  description:
+    'Get configuration parameter changes (Old Value → New Value) for a site USID over a date range. ' +
+    'Bounded by USID + date range. Date range is auto-capped to 30 days; pass a tighter range for faster queries. ' +
+    'Returns each changed parameter with its cell/node context and an AI-generated impact note. ' +
+    'Use when investigating "what changed?", "parameter changes", "config audit", or as part of RCA.',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Site USID.' },
+      startDate: { type: 'string', description: 'Start date YYYY-MM-DD. Defaults to 7 days ago.' },
+      endDate: { type: 'string', description: 'End date YYYY-MM-DD. Defaults to 3 days ago.' },
+      parameterFilter: { type: 'string', description: 'Optional parameter name substring to filter (e.g. "POWER", "TILT").' },
+    },
+    required: ['usid'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    if (!usid) return { llmText: 'usid is required.' };
+    // Bound: USID + date range (≤ 30 days) — every change for the site within the window.
+    const range = clampDateRange(
+      String(args.startDate || todayMinus(7)),
+      String(args.endDate || todayMinus(3)),
+      30,
+    );
+    const startDate = range.startDate;
+    const endDate = range.endDate;
+    const paramFilter = String(args.parameterFilter || '').replace(/[^A-Za-z0-9_%]/g, '').slice(0, 60);
+    const filterClause = paramFilter ? `AND Parameter LIKE '%${paramFilter}%'` : '';
+
+    let rows: any[] = [];
+    try {
+      const localFilter = paramFilter ? ` AND parameter ILIKE '%${paramFilter}%'` : '';
+      rows = await mirrorOrRemote({
+        local: {
+          sql: `SELECT date_id::date AS date_id,
+                       node AS "NODE",
+                       subelmt AS cell_name,
+                       parameter AS "Parameter",
+                       old_value AS "Old_Value",
+                       new_value AS "New_Value"
+                FROM mirror.configuration_parameters_table
+                WHERE usid = $1
+                  AND date_id::date BETWEEN $2::date AND $3::date
+                  ${localFilter}
+                ORDER BY date_id DESC, parameter`,
+          params: [usid, startDate, endDate],
+        },
+        remote: `
+          SELECT CAST(DATE_ID AS DATE) as date_id, NODE, SUBELMT as cell_name,
+            Parameter, Old_Value, New_Value
+          FROM configuration_parameters_table WITH (NOLOCK)
+          WHERE USID = '${usid}'
+            AND CAST(DATE_ID AS DATE) >= CAST('${startDate}' AS DATE)
+            AND CAST(DATE_ID AS DATE) <= CAST('${endDate}' AS DATE)
+            ${filterClause}
+          ORDER BY DATE_ID DESC, Parameter`,
+        tag: 'get_config_changes',
+      });
+    } catch (err) {
+      return { llmText: `Failed to fetch config changes for ${usid}: ${(err as Error).message}` };
+    }
+
+    if (!rows.length) {
+      return { llmText: `No configuration changes found for USID ${usid} between ${startDate} and ${endDate}${paramFilter ? ` matching "${paramFilter}"` : ''}.` };
+    }
+
+    // Per-parameter impact annotation: skip the extra LLM call (5–10s) and
+    // instead pass the DataDict description verbatim. The orchestrator's
+    // synthesis step already interprets these in the "What Changed" section.
+    const uniqueParams = [...new Set(rows.map((r) => String(r.Parameter || '')))].slice(0, 10);
+    let impactNote = '';
+    if (dataDictResolver.isLoaded && uniqueParams.length) {
+      const paramDefs = uniqueParams
+        .map((p) => {
+          const match = dataDictResolver.fuzzyMatch(p, { limit: 1, minScore: 0.5 });
+          const desc = match[0]?.description || match[0]?.paramName;
+          return desc ? `• ${p} — ${String(desc).slice(0, 200)}` : `• ${p}`;
+        })
+        .join('\n');
+      impactNote = paramDefs;
+    }
+
+    const tableRows = rows.map((r: any) => ({
+      Date: String(r.date_id || '').slice(0, 10),
+      Cell: String(r.cell_name || '—'),
+      Parameter: String(r.Parameter || '—'),
+      'Old Value': String(r.Old_Value ?? '—'),
+      'New Value': String(r.New_Value ?? '—'),
+    }));
+
+    // The llmText is sent to the LLM (4 KB cap via clampString). Show first ~20 in the
+    // textual summary; the full set is rendered in the data_table UI below.
+    const llmText = clampString(
+      `Config changes for USID ${usid} (${startDate} → ${endDate}): ${rows.length} changes\n` +
+      tableRows.slice(0, 20).map((r) => `• ${r.Date} ${r.Cell}: ${r.Parameter} ${r['Old Value']} → ${r['New Value']}`).join('\n') +
+      (impactNote ? `\n\nPotential impact:\n${impactNote}` : ''),
+    );
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'compact_table',
+        title: `Config Changes · USID ${usid} · ${startDate}–${endDate}`,
+        data: { title: `Parameter Changes — USID ${usid}`, subtitle: `${startDate}→${endDate}`, rows: tableRows },
+      },
+    };
+  },
+};
+
+/** Tool 3 — Neighbor handover relations with distribution analysis */
+const tool_get_neighbor_relations: AgentTool = {
+  name: 'get_neighbor_relations',
+  description:
+    'Get the neighbor handover relation map for a USID. Returns all neighbors ranked by handover volume, ' +
+    'with HO counts, cumulative %, face (sector), and physical distance. ' +
+    'Includes analysis: top-neighbor dominance, distance distribution, HO concentration. ' +
+    'Use to understand coverage dependencies and identify potentially missing/broken relations.',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Source site USID.' },
+      date: { type: 'string', description: 'Date YYYY-MM-DD. Defaults to 3 days ago.' },
+    },
+    required: ['usid'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    if (!usid) return { llmText: 'usid is required.' };
+    const startDate = sanitizeDate(String(args.date || todayMinus(3)));
+
+    const found = await withDateFallback(async (dateId) => {
+      return mirrorOrRemote({
+        local: {
+          sql: `SELECT source_usid AS "SOURCE_USID",
+                       neigh_usid AS "NEIGH_USID",
+                       source_usid_face AS "SOURCE_USID_FACE",
+                       neigh_usid_face AS "NEIGH_USID_FACE",
+                       handover_count AS "HANDOVER_COUNT",
+                       ho_rank AS "HO_RANK",
+                       total_handover AS "TOTAL_HANDOVER",
+                       cummulative_sum AS "CUMMULATIVE_SUM",
+                       perc_handover AS "PERC_HANDOVER",
+                       source_neigh_distance_meters AS "SOURCE_NEIGH_DISTANCE_METERS"
+                FROM mirror.neighbors_table_date_id
+                WHERE source_usid = $1 AND date_id::date = $2::date
+                ORDER BY ho_rank ASC`,
+          params: [usid, dateId],
+        },
+        remote: `
+          SELECT SOURCE_USID, NEIGH_USID, SOURCE_USID_FACE, NEIGH_USID_FACE,
+            HANDOVER_COUNT, HO_RANK, TOTAL_HANDOVER, CUMMULATIVE_SUM,
+            PERC_HANDOVER, SOURCE_NEIGH_DISTANCE_METERS
+          FROM neighbors_table_date_id WITH (NOLOCK)
+          WHERE SOURCE_USID = '${usid}'
+            AND CAST(DATE_ID AS DATE) = CAST('${dateId}' AS DATE)
+          ORDER BY HO_RANK ASC`,
+        tag: 'get_neighbor_relations',
+      });
+    }, startDate);
+
+    if (!found || !found.rows.length) {
+      return { llmText: `No neighbor relation data found for USID ${usid} near ${startDate}.` };
+    }
+
+    const { rows, dateId } = found;
+
+    // Analysis
+    const top5HoPct = rows.slice(0, 5).reduce((s: number, r: any) => s + Number(r.PERC_HANDOVER || 0), 0);
+    const near = rows.filter((r: any) => Number(r.SOURCE_NEIGH_DISTANCE_METERS) < 500).length;
+    const mid = rows.filter((r: any) => { const d = Number(r.SOURCE_NEIGH_DISTANCE_METERS); return d >= 500 && d < 2000; }).length;
+    const far = rows.filter((r: any) => Number(r.SOURCE_NEIGH_DISTANCE_METERS) >= 2000).length;
+    const top1Pct = Number(rows[0]?.PERC_HANDOVER || 0);
+    const dominanceNote = top1Pct > 40 ? `⚠ Top neighbor handles ${top1Pct.toFixed(1)}% of HOs — possible coverage gap.` : '';
+
+    const tableRows = rows.map((r: any) => ({
+      Rank: String(r.HO_RANK || '—'),
+      'Neighbor USID': String(r.NEIGH_USID || '—'),
+      'Src Face': String(r.SOURCE_USID_FACE || '—'),
+      'Nbr Face': String(r.NEIGH_USID_FACE || '—'),
+      'HO Count': String(r.HANDOVER_COUNT || 0),
+      'HO %': Number(r.PERC_HANDOVER || 0).toFixed(1) + '%',
+      'Cumul %': Number(r.CUMMULATIVE_SUM || 0).toFixed(1) + '%',
+      'Distance (m)': r.SOURCE_NEIGH_DISTANCE_METERS != null ? String(Math.round(Number(r.SOURCE_NEIGH_DISTANCE_METERS))) : '—',
+    }));
+
+    const llmText = clampString(
+      `Neighbor relations for USID ${usid} on ${dateId}: ${rows.length} neighbors\n` +
+      `Top-5 neighbors handle ${top5HoPct.toFixed(1)}% of all HOs\n` +
+      `Distance distribution: near<500m=${near}, mid 500m–2km=${mid}, far>2km=${far}\n` +
+      (dominanceNote ? dominanceNote + '\n' : '') +
+      rows.slice(0, 15).map((r: any) =>
+        `  Rank ${r.HO_RANK}: USID ${r.NEIGH_USID} (${Number(r.PERC_HANDOVER || 0).toFixed(1)}% HO, ${Math.round(Number(r.SOURCE_NEIGH_DISTANCE_METERS || 0))}m)`
+      ).join('\n'),
+    );
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'compact_table',
+        title: `Neighbor Relations · USID ${usid} · ${dateId}`,
+        data: { title: `Neighbor HO Map — USID ${usid}`, subtitle: dateId, rows: tableRows },
+      },
+    };
+  },
+};
+
+/** Tool 4 — RET (Remote Electrical Tilt) values + change detection across two dates */
+const tool_get_ret_changes: AgentTool = {
+  name: 'get_ret_changes',
+  description:
+    'Get Remote Electrical Tilt (RET) values for all sectors of a USID, and detect tilt changes ' +
+    'between a start date and end date. Returns current tilt, min/max range, antenna model, and ' +
+    'sector label (ALPHA/BETA/GAMMA). Highlights any sectors where the tilt changed. ' +
+    'Use when HOSR drops, unexpected coverage changes, or interference symptoms appear.',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Site USID.' },
+      startDate: { type: 'string', description: 'Earlier snapshot date YYYY-MM-DD. Defaults to 14 days ago.' },
+      endDate: { type: 'string', description: 'Later snapshot date YYYY-MM-DD. Defaults to 3 days ago.' },
+    },
+    required: ['usid'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    if (!usid) return { llmText: 'usid is required.' };
+    const startDate = sanitizeDate(String(args.startDate || todayMinus(14)));
+    const endDate = sanitizeDate(String(args.endDate || todayMinus(3)));
+
+    // Fetch both snapshots in parallel; walk back if needed
+    const fetchRet = (dateId: string) => mirrorOrRemote({
+      local: {
+        sql: `SELECT iuantsectorid AS "IUANTSECTORID",
+                     userlabel AS "USERLABEL",
+                     electricalantennatilt AS "ELECTRICALANTENNATILT",
+                     mintilt AS "MINTILT",
+                     maxtilt AS "MAXTILT",
+                     iuantantennamodelnumber AS "IUANTANTENNAMODELNUMBER",
+                     node AS "NODE",
+                     date_id::date AS snap_date
+              FROM mirror.ret_table
+              WHERE usid = $1 AND date_id::date = $2::date`,
+        params: [usid, dateId],
+      },
+      remote: `
+        SELECT IUANTSECTORID, USERLABEL, ELECTRICALANTENNATILT, MINTILT, MAXTILT,
+          IUANTANTENNAMODELNUMBER, NODE, CAST(DATE_ID AS DATE) as snap_date
+        FROM ret_table WITH (NOLOCK)
+        WHERE USID = '${usid}' AND CAST(DATE_ID AS DATE) = CAST('${dateId}' AS DATE)`,
+      tag: 'get_ret_changes',
+    });
+
+    const [endFound, startFound] = await Promise.all([
+      withDateFallback((d) => fetchRet(d), endDate, 7),
+      withDateFallback((d) => fetchRet(d), startDate, 7),
+    ]);
+
+    if (!endFound || !endFound.rows.length) {
+      return { llmText: `No RET data found for USID ${usid} near ${endDate}.` };
+    }
+
+    const endRows: any[] = endFound.rows;
+    const startRows: any[] = startFound?.rows || [];
+
+    // Build lookup for start snapshot by label key
+    const startByKey = new Map<string, any>();
+    for (const r of startRows) {
+      const key = `${r.IUANTSECTORID || ''}|${r.USERLABEL || ''}`;
+      startByKey.set(key, r);
+    }
+
+    const tableRows = endRows.map((r: any) => {
+      const key = `${r.IUANTSECTORID || ''}|${r.USERLABEL || ''}`;
+      const prev = startByKey.get(key);
+      const prevTilt = prev ? Number(prev.ELECTRICALANTENNATILT) : null;
+      const curTilt = r.ELECTRICALANTENNATILT != null ? Number(r.ELECTRICALANTENNATILT) : null;
+      const changed = prevTilt !== null && curTilt !== null && prevTilt !== curTilt;
+      return {
+        Sector: String(r.IUANTSECTORID || '—'),
+        Label: String(r.USERLABEL || '—'),
+        'Tilt (current)': curTilt != null ? `${curTilt}°` : '—',
+        'Tilt (prev)': prevTilt != null ? `${prevTilt}°` : '—',
+        'Min': r.MINTILT != null ? `${r.MINTILT}°` : '—',
+        'Max': r.MAXTILT != null ? `${r.MAXTILT}°` : '—',
+        'Model': String(r.IUANTANTENNAMODELNUMBER || '—'),
+        'Changed': changed ? `⚠ ${prevTilt}° → ${curTilt}°` : '—',
+      };
+    });
+
+    const changed = tableRows.filter((r) => r.Changed !== '—');
+    const llmText = clampString(
+      `RET data for USID ${usid} (${startFound?.dateId || startDate} → ${endFound.dateId}):\n` +
+      `Sectors: ${endRows.length} | Tilt changes detected: ${changed.length}\n` +
+      (changed.length ? `Changed sectors:\n${changed.map((r) => `  ${r.Sector} (${r.Label}): ${r.Changed}`).join('\n')}\n` : 'No tilt changes detected between the two snapshots.\n') +
+      tableRows.map((r) => `• ${r.Sector} ${r.Label}: tilt=${r['Tilt (current)']} min=${r.Min} max=${r.Max} model=${r.Model}`).join('\n'),
+    );
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'compact_table',
+        title: `RET Tilts · USID ${usid} · ${endFound.dateId}`,
+        data: { title: `Antenna Tilts — USID ${usid}`, subtitle: endFound.dateId, rows: tableRows },
+      },
+    };
+  },
+};
+
+/** Tool 5 — Outage events on the site itself */
+const tool_get_site_outages: AgentTool = {
+  name: 'get_site_outages',
+  description:
+    'Get outage events on a specific site (USID): which cells were down, what metric (4G_CELL_DOWN etc.), ' +
+    'and at which hour. Bounded by USID + date range (auto-capped to 14 days). ' +
+    'Also returns the site-level outage flag and outage summary from the AI RCA. ' +
+    'Use early in any site investigation to confirm whether cells are actually out.',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Site USID.' },
+      startDate: { type: 'string', description: 'Start date YYYY-MM-DD. Defaults to 7 days ago.' },
+      endDate: { type: 'string', description: 'End date YYYY-MM-DD. Defaults to 3 days ago.' },
+    },
+    required: ['usid'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    if (!usid) return { llmText: 'usid is required.' };
+    // Bound: USID + date range (≤ 14 days). Both queries strictly bracket DATE_ID.
+    const range = clampDateRange(
+      String(args.startDate || todayMinus(7)),
+      String(args.endDate || todayMinus(3)),
+      14,
+    );
+    const startDate = range.startDate;
+    const endDate = range.endDate;
+
+    const [outageRows, siteRows] = await Promise.all([
+      mirrorOrRemote({
+        local: {
+          sql: `SELECT date_id::date AS date_id, cell_name,
+                       metric AS "METRIC",
+                       snapshot_hour AS "SNAPSHOT_HOUR"
+                FROM mirror.outage_table
+                WHERE usid = $1
+                  AND date_id::date BETWEEN $2::date AND $3::date
+                ORDER BY date_id DESC, snapshot_hour`,
+          params: [usid, startDate, endDate],
+        },
+        remote: `
+          SELECT CAST(DATE_ID AS DATE) as date_id, cell_name, METRIC, SNAPSHOT_HOUR
+          FROM outage_table WITH (NOLOCK)
+          WHERE USID = '${usid}'
+            AND CAST(DATE_ID AS DATE) >= CAST('${startDate}' AS DATE)
+            AND CAST(DATE_ID AS DATE) <= CAST('${endDate}' AS DATE)
+          ORDER BY DATE_ID DESC, SNAPSHOT_HOUR`,
+        tag: 'get_site_outages.outage',
+      }).catch(() => []),
+      mirrorOrRemote({
+        local: {
+          sql: `SELECT date_id::date AS date_id, outage, outage_timestamp, outage_summary
+                FROM mirror.site_table
+                WHERE usid = $1
+                  AND date_id::date BETWEEN $2::date AND $3::date
+                ORDER BY date_id DESC`,
+          params: [usid, startDate, endDate],
+        },
+        remote: `
+          SELECT CAST(DATE_ID AS DATE) as date_id, outage, outage_timestamp, outage_summary
+          FROM site_table WITH (NOLOCK)
+          WHERE USID = '${usid}'
+            AND CAST(DATE_ID AS DATE) >= CAST('${startDate}' AS DATE)
+            AND CAST(DATE_ID AS DATE) <= CAST('${endDate}' AS DATE)
+          ORDER BY DATE_ID DESC`,
+        tag: 'get_site_outages.site',
+      }).catch(() => []),
+    ]);
+
+    const activeOutage = siteRows.find((r: any) => r.outage);
+
+    if (!outageRows.length && !activeOutage) {
+      return { llmText: `No outage events found for USID ${usid} between ${startDate} and ${endDate}.` };
+    }
+
+    const tableRows = outageRows.map((r: any) => ({
+      Date: String(r.date_id || '').slice(0, 10),
+      Cell: String(r.cell_name || '—'),
+      Metric: String(r.METRIC || '—'),
+      Hour: r.SNAPSHOT_HOUR != null ? `${r.SNAPSHOT_HOUR}:00` : '—',
+    }));
+
+    const outageFlag = activeOutage ? `⚠ ACTIVE OUTAGE: ${String(activeOutage.outage_summary || '').slice(0, 200)}` : '';
+
+    const llmText = clampString(
+      `Outages for USID ${usid} (${startDate}–${endDate}): ${outageRows.length} cell-outage events\n` +
+      (outageFlag ? outageFlag + '\n' : '') +
+      tableRows.slice(0, 20).map((r) => `• ${r.Date} ${r.Cell}: ${r.Metric} at ${r.Hour}`).join('\n'),
+    );
+
+    const result: ToolResult = { llmText };
+    if (tableRows.length) {
+      result.uiBlock = {
+        type: 'compact_table',
+        title: `Outages · USID ${usid} · ${startDate}–${endDate}`,
+        data: { title: `Outage Events — USID ${usid}`, subtitle: `${startDate}→${endDate}`, rows: tableRows },
+      };
+    }
+    return result;
+  },
+};
+
+/** Tool 6 — Outages on this site's handover neighbors */
+const tool_get_neighbor_outages: AgentTool = {
+  name: 'get_neighbor_outages',
+  description:
+    'Find which of a site\'s handover neighbors have active outages, and estimate how much of the ' +
+    'source site\'s handover traffic they represent. Use after get_neighbor_relations to understand ' +
+    'whether neighbour outages are causing HOSR degradation or traffic absorption problems.',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Source site USID.' },
+      date: { type: 'string', description: 'Date YYYY-MM-DD. Defaults to 3 days ago.' },
+    },
+    required: ['usid'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    if (!usid) return { llmText: 'usid is required.' };
+    const startDate = sanitizeDate(String(args.date || todayMinus(3)));
+
+    const neighborFound = await withDateFallback(async (dateId) => {
+      // Bound: SOURCE_USID + single DATE_ID — naturally yields all neighbors of the source.
+      return mirrorOrRemote({
+        local: {
+          sql: `SELECT neigh_usid AS "NEIGH_USID",
+                       ho_rank AS "HO_RANK",
+                       perc_handover AS "PERC_HANDOVER",
+                       source_neigh_distance_meters AS "SOURCE_NEIGH_DISTANCE_METERS"
+                FROM mirror.neighbors_table_date_id
+                WHERE source_usid = $1 AND date_id::date = $2::date
+                ORDER BY ho_rank ASC`,
+          params: [usid, dateId],
+        },
+        remote: `
+          SELECT NEIGH_USID, HO_RANK, PERC_HANDOVER, SOURCE_NEIGH_DISTANCE_METERS
+          FROM neighbors_table_date_id WITH (NOLOCK)
+          WHERE SOURCE_USID = '${usid}'
+            AND CAST(DATE_ID AS DATE) = CAST('${dateId}' AS DATE)
+          ORDER BY HO_RANK ASC`,
+        tag: 'get_neighbor_outages.neighbors',
+      });
+    }, startDate);
+
+    if (!neighborFound || !neighborFound.rows.length) {
+      return { llmText: `No neighbor data found for USID ${usid} near ${startDate}.` };
+    }
+
+    const { rows: neighborRows, dateId } = neighborFound;
+    // Build sanitized neighbor USID list for both local and remote queries.
+    const neighborUsidArr = neighborRows.map((r: any) => sanitizeSiteId(String(r.NEIGH_USID))).filter(Boolean);
+    const neighborUsidsRemote = neighborUsidArr.map((u) => `'${u}'`).join(',');
+    if (!neighborUsidArr.length) return { llmText: `No neighbor USIDs resolved for ${usid}.` };
+
+    // Bound: USID list (already capped by physical neighbor count) + single DATE_ID.
+    const outageRows: any[] = await mirrorOrRemote({
+      local: {
+        sql: `SELECT usid AS "USID", cell_name,
+                     metric AS "METRIC",
+                     snapshot_hour AS "SNAPSHOT_HOUR",
+                     date_id::date AS date_id
+              FROM mirror.outage_table
+              WHERE usid = ANY($1::text[]) AND date_id::date = $2::date`,
+        params: [neighborUsidArr, dateId],
+      },
+      remote: `
+        SELECT o.USID, o.cell_name, o.METRIC, o.SNAPSHOT_HOUR, CAST(o.DATE_ID AS DATE) as date_id
+        FROM outage_table o WITH (NOLOCK)
+        WHERE o.USID IN (${neighborUsidsRemote})
+          AND CAST(o.DATE_ID AS DATE) = CAST('${dateId}' AS DATE)`,
+      tag: 'get_neighbor_outages.outages',
+    }).catch(() => []);
+
+    const outagedUsids = new Set(outageRows.map((r: any) => String(r.USID)));
+
+    const impacted = neighborRows
+      .filter((r: any) => outagedUsids.has(String(r.NEIGH_USID)))
+      .map((r: any) => ({
+        'Neighbor USID': String(r.NEIGH_USID),
+        'HO Rank': String(r.HO_RANK),
+        'HO %': Number(r.PERC_HANDOVER || 0).toFixed(1) + '%',
+        'Distance (m)': r.SOURCE_NEIGH_DISTANCE_METERS != null ? String(Math.round(Number(r.SOURCE_NEIGH_DISTANCE_METERS))) : '—',
+        'Outage Cells': outageRows.filter((o: any) => String(o.USID) === String(r.NEIGH_USID)).map((o: any) => o.cell_name).join(', '),
+      }));
+
+    if (!impacted.length) {
+      return { llmText: `None of USID ${usid}'s ${neighborRows.length} neighbors have outages on ${dateId}.` };
+    }
+
+    const totalHoPct = impacted.reduce((s, r) => s + parseFloat(r['HO %']), 0);
+    const llmText = clampString(
+      `${impacted.length} of ${neighborRows.length} neighbors have outages on ${dateId} — affecting ${totalHoPct.toFixed(1)}% of ${usid}'s handover traffic.\n` +
+      impacted.map((r) => `• USID ${r['Neighbor USID']} (Rank ${r['HO Rank']}, ${r['HO %']} HO): cells down: ${r['Outage Cells']}`).join('\n'),
+    );
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'compact_table',
+        title: `Neighbor Outages · USID ${usid} · ${dateId}`,
+        data: { title: `Neighbor Outage Impact — USID ${usid}`, subtitle: dateId, rows: impacted },
+      },
+    };
+  },
+};
+
+/** Tool 7 — Hourly KPI trends: multi-cell, multi-day, anomaly flagging + LLM narrative */
+const tool_get_hourly_trends: AgentTool = {
+  name: 'get_hourly_trends',
+  description:
+    'Show the standard hourly KPI dashboard for a USID, preloaded with the requested KPIs. ' +
+    'The user gets the full interactive dashboard (with daily/hourly toggle, KPI selector, ' +
+    'multi-cell breakdown). The tool also fetches raw rows server-side to compute anomaly-hour ' +
+    'flags and a short LLM narrative — these are returned to the LLM as text context (not as ' +
+    'separate UI blocks) so the agent can reason about the pattern. ' +
+    'Bounded by USID + KPI list (≤8) + date range (auto-capped to 7 days).',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Site USID.' },
+      kpiNames: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'KPI names. Defaults to ["DL_DRB_TPUT","HOSR","DATA_RAN_ACC"].',
+      },
+      startDate: { type: 'string', description: 'Start date YYYY-MM-DD. Defaults to 3 days ago.' },
+      endDate: { type: 'string', description: 'End date YYYY-MM-DD. Defaults to same as startDate.' },
+      includeNarrative: { type: 'boolean', description: 'Generate LLM narrative. Default true.' },
+    },
+    required: ['usid'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    if (!usid) return { llmText: 'usid is required.' };
+
+    const rawKpis = sanitizeKpiList(args.kpiNames, ['DL_DRB_TPUT', 'HOSR', 'DATA_RAN_ACC'], 8);
+    const kpiList = rawKpis.map((k) => `'${k}'`).join(',');
+
+    const range = clampDateRange(
+      String(args.startDate || todayMinus(3)),
+      String(args.endDate || args.startDate || todayMinus(3)),
+      7,
+    );
+    const startDate = range.startDate;
+    const endDate = range.endDate;
+    const includeNarrative = args.includeNarrative !== false;
+
+    // Fetch raw rows for analytical context — drives the narrative + anomaly callouts
+    // that the LLM uses in its synthesis. The visual dashboard re-fetches its own data
+    // via the existing /api/kpis pipeline, so this query is purely for reasoning.
+    let rows: any[] = [];
+    try {
+      rows = await mirrorOrRemote({
+        local: {
+          sql: `SELECT cell_name,
+                       date_id::date AS date_id,
+                       hour_id AS "HOUR_ID",
+                       kpi_name, kpi_value, anomaly_flag, anomaly_score
+                FROM mirror.hourly_intermediate_kpis_table
+                WHERE usid = $1
+                  AND kpi_name = ANY($2::text[])
+                  AND date_id::date BETWEEN $3::date AND $4::date
+                ORDER BY cell_name, date_id ASC, hour_id ASC`,
+          params: [usid, rawKpis, startDate, endDate],
+        },
+        remote: `
+          SELECT cell_name, CAST(DATE_ID AS DATE) as date_id, HOUR_ID,
+            kpi_name, kpi_value, anomaly_flag, anomaly_score
+          FROM hourly_intermediate_kpis_table WITH (NOLOCK)
+          WHERE USID = '${usid}'
+            AND kpi_name IN (${kpiList})
+            AND CAST(DATE_ID AS DATE) >= CAST('${startDate}' AS DATE)
+            AND CAST(DATE_ID AS DATE) <= CAST('${endDate}' AS DATE)
+          ORDER BY cell_name, DATE_ID ASC, HOUR_ID ASC`,
+        tag: 'get_hourly_trends',
+      });
+    } catch (err) {
+      // Even if the analytical query fails, still return the dashboard.
+      return {
+        llmText: `Loaded hourly dashboard for USID ${usid}. Analytical context unavailable: ${(err as Error).message}`,
+        uiBlock: {
+          type: 'kpi_dashboard',
+          // No kpiNames → dashboard shows the full ALL_STANDARD_KPIS set.
+          // collapseAfterGroups=2 → only Throughput + Accessibility render initially.
+          data: { siteId: usid, timeframe: 'hourly', daysBack: 3, collapseAfterGroups: 2 },
+        },
+      };
+    }
+
+    const primaryKpi = rawKpis[0];
+    const cells = [...new Set(rows.map((r) => String(r.cell_name)))];
+
+    const anomalyHours = rows
+      .filter((r) => r.anomaly_flag || Number(r.anomaly_score) > 0.7)
+      .map((r) => ({
+        cell: r.cell_name,
+        date: String(r.date_id).slice(0, 10),
+        hour: r.HOUR_ID,
+        kpi: r.kpi_name,
+        value: r.kpi_value,
+        score: Number(r.anomaly_score || 0).toFixed(2),
+      }));
+
+    const statItems = cells.map((cell) => {
+      const cellRows = rows.filter((r) => String(r.cell_name) === cell && String(r.kpi_name) === primaryKpi);
+      const vals = cellRows.map((r) => Number(r.kpi_value)).filter(isFinite);
+      const avg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+      const peak = vals.length ? Math.max(...vals) : 0;
+      const min = vals.length ? Math.min(...vals) : 0;
+      return { label: cell, avg, peak, min };
+    });
+
+    // Per-tool narrative was removed: the orchestrator's final synthesis already
+    // interprets the raw stats + anomaly list passed via llmText. Keeping a second
+    // LLM call here added 5–10s with no quality benefit. The `includeNarrative`
+    // arg is preserved for API compatibility but is now a no-op.
+    void includeNarrative;
+    const narrative = '';
+
+    const anomalyText = anomalyHours.length
+      ? `Anomalous hours (${anomalyHours.length}): ` +
+        anomalyHours.slice(0, 8).map((a) => `${a.cell} ${a.date} ${a.hour}:00`).join(', ') +
+        (anomalyHours.length > 8 ? ` … +${anomalyHours.length - 8} more` : '')
+      : 'No anomaly hours flagged.';
+
+    const llmText = clampString(
+      `Loaded hourly KPI dashboard for USID ${usid} (${startDate}–${endDate}, KPIs: ${rawKpis.join(', ')}).\n` +
+        `Cells: ${cells.length} | data points: ${rows.length}\n` +
+        anomalyText + '\n' +
+        statItems
+          .map((s) => `• ${s.label}: avg ${s.avg.toFixed(1)} | peak ${s.peak.toFixed(1)} | min ${s.min.toFixed(1)} (${primaryKpi})`)
+          .join('\n') +
+        (narrative ? `\n\nAnalysis:\n${narrative}` : ''),
+    );
+
+    // Convert the requested day-range into a valid hourly window (24/48/72h).
+    // The kpi_dashboard daysBack field is HOURS when timeframe='hourly'.
+    const daysSpan = Math.max(1, Math.round((new Date(endDate).getTime() - new Date(startDate).getTime()) / 86_400_000) + 1);
+    const hoursBack = daysSpan <= 1 ? 24 : daysSpan <= 2 ? 48 : 72;
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'kpi_dashboard',
+        // No kpiNames → dashboard shows the full ALL_STANDARD_KPIS set so the user
+        // gets a complete view (not just the 3 KPIs we used for narrative analysis).
+        // collapseAfterGroups=2 → only Throughput + Accessibility render initially;
+        // an "Expand to show more" bar reveals the rest on click.
+        data: {
+          siteId: usid,
+          timeframe: 'hourly',
+          daysBack: hoursBack,
+          collapseAfterGroups: 2,
+        },
+      },
+    };
+  },
+};
+
+/** Tool 8 — CQX sub-component impact breakdown */
+const tool_get_kpi_impact_breakdown: AgentTool = {
+  name: 'get_kpi_impact_breakdown',
+  description:
+    'Get the CQX super-KPI impact breakdown for a site — shows which dimensions ' +
+    '(DL throughput, data drop, voice drop, accessibility, etc.) are contributing to degradation. ' +
+    'Also returns week-over-week impact delta. Use after initial KPI snapshot to understand WHERE ' +
+    'to dig deeper (e.g. high DATA_DROP_IMP → investigate drop rate tools).',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Site USID.' },
+      date: { type: 'string', description: 'Date YYYY-MM-DD. Defaults to 3 days ago.' },
+    },
+    required: ['usid'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    if (!usid) return { llmText: 'usid is required.' };
+    const startDate = sanitizeDate(String(args.date || todayMinus(3)));
+
+    const found = await withDateFallback(async (dateId) => {
+      const [subRows, cqxRows] = await Promise.all([
+        mirrorOrRemote({
+          local: {
+            sql: `SELECT subcomponent_name, subcomponent_value, anomaly_flag, anomaly_score_ratio
+                  FROM mirror.subcomponent_table
+                  WHERE usid = $1 AND date_id::date = $2::date
+                  ORDER BY ABS(COALESCE(subcomponent_value, 0)) DESC`,
+            params: [usid, dateId],
+          },
+          remote: `
+            SELECT subcomponent_name, subcomponent_value, anomaly_flag, anomaly_score_ratio
+            FROM subcomponent_table WITH (NOLOCK)
+            WHERE USID = '${usid}' AND CAST(DATE_ID AS DATE) = CAST('${dateId}' AS DATE)
+            ORDER BY ABS(ISNULL(subcomponent_value, 0)) DESC`,
+          tag: 'get_kpi_impact_breakdown.sub',
+        }),
+        mirrorOrRemote({
+          local: {
+            sql: `SELECT total_impact_latest AS "TOTAL_IMPACT_LATEST",
+                         dl_tput_imp AS "DL_TPUT_IMP",
+                         ul_tput_imp AS "UL_TPUT_IMP",
+                         data_drop_imp AS "DATA_DROP_IMP",
+                         data_acc_imp AS "DATA_ACC_IMP",
+                         voice_drop_imp AS "VOICE_DROP_IMP",
+                         ns_eso_imp AS "NS_ESO_IMP",
+                         quality_imp AS "QUALITY_IMP",
+                         total_impact_wow AS "TOTAL_IMPACT_WOW",
+                         impact_delta AS "IMPACT_DELTA"
+                  FROM mirror.cqx_offenders_truth_table
+                  WHERE usid = $1 AND date_id::date = $2::date`,
+            params: [usid, dateId],
+          },
+          remote: `
+            SELECT TOTAL_IMPACT_LATEST, DL_TPUT_IMP, UL_TPUT_IMP, DATA_DROP_IMP,
+              DATA_ACC_IMP, VOICE_DROP_IMP, NS_ESO_IMP, QUALITY_IMP, TOTAL_IMPACT_WOW, IMPACT_DELTA
+            FROM cqx_offenders_truth_table WITH (NOLOCK)
+            WHERE USID = '${usid}' AND CAST(DATE_ID AS DATE) = CAST('${dateId}' AS DATE)`,
+          tag: 'get_kpi_impact_breakdown.cqx',
+        }),
+      ]);
+      return [...subRows, ...cqxRows].length ? [{ subRows, cqxRows }] : [];
+    }, startDate);
+
+    if (!found) return { llmText: `No impact data found for USID ${usid} near ${startDate}.` };
+    const { subRows, cqxRows } = (found.rows[0] as any);
+    const cqx = cqxRows[0] || {};
+
+    // Bar-gauge rows: one per subcomponent, ordered by absolute magnitude.
+    const meterRows = subRows
+      .map((r: any) => ({
+        label: String(r.subcomponent_name || 'Unknown'),
+        value: r.subcomponent_value != null ? Number(r.subcomponent_value) : null,
+        anomaly: Boolean(r.anomaly_flag),
+      }))
+      .sort((a: any, b: any) => Math.abs(Number(b.value) || 0) - Math.abs(Number(a.value) || 0));
+
+    const total = cqx.TOTAL_IMPACT_LATEST != null
+      ? {
+          label: 'Total CQX impact',
+          value: Number(cqx.TOTAL_IMPACT_LATEST),
+          wow: cqx.TOTAL_IMPACT_WOW != null ? Number(cqx.TOTAL_IMPACT_WOW) : undefined,
+        }
+      : undefined;
+
+    const cqxSummary = total
+      ? `Total CQX impact: ${total.value.toFixed(3)}${total.wow != null ? ` | WoW: ${total.wow.toFixed(3)}` : ''}\n` +
+        `  DL_TPUT=${Number(cqx.DL_TPUT_IMP||0).toFixed(3)} UL_TPUT=${Number(cqx.UL_TPUT_IMP||0).toFixed(3)} ` +
+        `DATA_DROP=${Number(cqx.DATA_DROP_IMP||0).toFixed(3)} VOICE_DROP=${Number(cqx.VOICE_DROP_IMP||0).toFixed(3)} ` +
+        `ACC=${Number(cqx.DATA_ACC_IMP||0).toFixed(3)} QUALITY=${Number(cqx.QUALITY_IMP||0).toFixed(3)}`
+      : '';
+
+    const llmText = clampString(
+      `KPI impact breakdown for USID ${usid} on ${found.dateId}:\n` +
+      (cqxSummary ? cqxSummary + '\n' : '') +
+      subRows.slice(0, 10).map((r: any) => `• ${r.subcomponent_name}: ${Number(r.subcomponent_value||0).toFixed(4)}${r.anomaly_flag ? ' ⚠' : ''}`).join('\n'),
+    );
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'severity_meter',
+        title: `Impact Breakdown · USID ${usid} · ${found.dateId}`,
+        data: {
+          title: `CQX Impact — USID ${usid}`,
+          subtitle: found.dateId,
+          rows: meterRows,
+          total,
+        },
+      },
+    };
+  },
+};
+
+/** Tool 9 — Trouble ticket history for a site */
+const tool_get_ticket_history: AgentTool = {
+  name: 'get_ticket_history',
+  description:
+    'Get trouble tickets for a site (USID) — categories, status, description, and assigned department. ' +
+    'Bounded by USID + date range (auto-capped to 90 days). ' +
+    'Use when the user mentions a ticket number, incident, or ongoing work order, or as part of ' +
+    'a full site investigation to correlate outages with field activity.',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Site USID.' },
+      startDate: { type: 'string', description: 'Start date YYYY-MM-DD. Defaults to 30 days ago.' },
+      endDate: { type: 'string', description: 'End date YYYY-MM-DD. Defaults to today.' },
+    },
+    required: ['usid'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    if (!usid) return { llmText: 'usid is required.' };
+    // Bound: USID + date range (≤ 90 days). Both ends bracketed.
+    const range = clampDateRange(
+      String(args.startDate || todayMinus(30)),
+      String(args.endDate || todayMinus(0)),
+      90,
+    );
+    const startDate = range.startDate;
+    const endDate = range.endDate;
+
+    let rows: any[] = [];
+    try {
+      rows = await mirrorOrRemote({
+        local: {
+          sql: `SELECT ticket_number AS "TICKET_NUMBER",
+                       create_time AS "CREATE_TIME",
+                       ticket_status AS "TICKET_STATUS",
+                       problem_category AS "PROBLEM_CATEGORY",
+                       problem_subcategory AS "PROBLEM_SUBCATEGORY",
+                       short_description AS "SHORT_DESCRIPTION",
+                       assigned_department AS "ASSIGNED_DEPARTMENT",
+                       date_id::date AS date_id
+                FROM mirror.ticket_table
+                WHERE usid = $1
+                  AND date_id::date BETWEEN $2::date AND $3::date
+                ORDER BY create_time DESC`,
+          params: [usid, startDate, endDate],
+        },
+        remote: `
+          SELECT TICKET_NUMBER, CREATE_TIME, TICKET_STATUS, PROBLEM_CATEGORY,
+            PROBLEM_SUBCATEGORY, SHORT_DESCRIPTION, ASSIGNED_DEPARTMENT,
+            CAST(DATE_ID AS DATE) as date_id
+          FROM ticket_table WITH (NOLOCK)
+          WHERE USID = '${usid}'
+            AND CAST(DATE_ID AS DATE) >= CAST('${startDate}' AS DATE)
+            AND CAST(DATE_ID AS DATE) <= CAST('${endDate}' AS DATE)
+          ORDER BY CREATE_TIME DESC`,
+        tag: 'get_ticket_history',
+      });
+    } catch (err) {
+      return { llmText: `Failed to fetch tickets for ${usid}: ${(err as Error).message}` };
+    }
+
+    if (!rows.length) {
+      return { llmText: `No tickets found for USID ${usid} between ${startDate} and ${endDate}.` };
+    }
+
+    const open = rows.filter((r) => String(r.TICKET_STATUS || '').toUpperCase() !== 'CLOSED').length;
+    const tableRows = rows.map((r: any) => ({
+      Ticket: String(r.TICKET_NUMBER || '—'),
+      Created: String(r.CREATE_TIME || '').slice(0, 10),
+      Status: String(r.TICKET_STATUS || '—'),
+      Category: String(r.PROBLEM_CATEGORY || '—'),
+      Subcategory: String(r.PROBLEM_SUBCATEGORY || '—'),
+      Description: String(r.SHORT_DESCRIPTION || '—').slice(0, 80),
+      Department: String(r.ASSIGNED_DEPARTMENT || '—'),
+    }));
+
+    const llmText = clampString(
+      `Tickets for USID ${usid} (${startDate} → ${endDate}): ${rows.length} total (${open} open)\n` +
+      tableRows.slice(0, 10).map((r) => `• [${r.Status}] ${r.Created} ${r.Category}/${r.Subcategory}: ${r.Description}`).join('\n'),
+    );
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'compact_table',
+        title: `Tickets · USID ${usid}`,
+        data: { title: `Trouble Tickets — USID ${usid}`, rows: tableRows },
+      },
+    };
+  },
+};
+
+/** Tool 10 — Compare site KPI against its cluster peers */
+const tool_compare_with_cluster: AgentTool = {
+  name: 'compare_with_cluster',
+  description:
+    'Compare a site\'s KPI value against all peers in the same cluster. Returns a ranked list of ' +
+    'cluster sites with their avg KPI value, the source site\'s rank/percentile, and whether it is ' +
+    'a statistical outlier. Use to confirm whether an issue is site-specific or cluster-wide.',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: { type: 'string', description: 'Site USID.' },
+      kpiName: { type: 'string', description: 'Exact KPI name (e.g. DL_DRB_TPUT, HOSR).' },
+      date: { type: 'string', description: 'Date YYYY-MM-DD. Defaults to 3 days ago.' },
+    },
+    required: ['usid', 'kpiName'],
+  },
+  async execute(args) {
+    const usid = sanitizeSiteId(String(args.usid || '').trim());
+    const kpiName = String(args.kpiName || '').replace(/[^A-Za-z0-9_]/g, '').slice(0, 60);
+    if (!usid || !kpiName) return { llmText: 'usid and kpiName are required.' };
+    const startDate = sanitizeDate(String(args.date || todayMinus(3)));
+
+    const clusterFound = await withDateFallback(async (dateId) => {
+      return mirrorOrRemote({
+        local: {
+          sql: `SELECT clusterid AS "CLUSTERID"
+                FROM mirror.site_table
+                WHERE usid = $1 AND date_id::date = $2::date
+                LIMIT 1`,
+          params: [usid, dateId],
+        },
+        remote: `
+          SELECT TOP 1 CLUSTERID FROM site_table WITH (NOLOCK)
+          WHERE USID = '${usid}' AND CAST(DATE_ID AS DATE) = CAST('${dateId}' AS DATE)`,
+        tag: 'compare_with_cluster.lookup',
+      });
+    }, startDate);
+
+    if (!clusterFound || !clusterFound.rows.length) {
+      return { llmText: `Could not find cluster for USID ${usid} near ${startDate}.` };
+    }
+
+    const clusterId = String(clusterFound.rows[0].CLUSTERID || '').replace(/[^A-Za-z0-9_\-]/g, '').slice(0, 60);
+    const dateId = clusterFound.dateId;
+
+    if (!clusterId) return { llmText: `No cluster ID found for USID ${usid}.` };
+
+    // Local mirror only contains offender USIDs, so the JOIN here is restricted
+    // to offender peers in the cluster. If the local result is empty (e.g. cluster
+    // has no offenders other than the source), we fall back to the full remote scan.
+    let peerRows: any[] = [];
+    try {
+      peerRows = await mirrorOrRemote({
+        local: {
+          sql: `SELECT s.usid AS "USID",
+                       s.site_name,
+                       AVG(k.kpi_value::float) AS avg_kpi,
+                       MAX(s.anomaly_flag::int)::boolean AS anomaly_flag,
+                       MAX(s.anomaly_score) AS anomaly_score
+                FROM mirror.site_table s
+                JOIN mirror.intermediate_kpi_table k
+                  ON s.usid = k.usid AND s.date_id::date = k.date_id::date
+                WHERE s.clusterid = $1
+                  AND k.kpi_name = $2
+                  AND k.date_id::date = $3::date
+                GROUP BY s.usid, s.site_name
+                ORDER BY avg_kpi DESC`,
+          params: [clusterId, kpiName, dateId],
+        },
+        remote: `
+          SELECT s.USID, s.site_name, AVG(CAST(k.kpi_value AS FLOAT)) as avg_kpi,
+            s.anomaly_flag, s.anomaly_score
+          FROM site_table s WITH (NOLOCK)
+          JOIN intermediate_kpi_table k WITH (NOLOCK)
+            ON s.USID = k.USID AND CAST(s.DATE_ID AS DATE) = CAST(k.DATE_ID AS DATE)
+          WHERE s.CLUSTERID = '${clusterId}'
+            AND k.kpi_name = '${kpiName}'
+            AND CAST(k.DATE_ID AS DATE) = CAST('${dateId}' AS DATE)
+          GROUP BY s.USID, s.site_name, s.anomaly_flag, s.anomaly_score
+          ORDER BY avg_kpi DESC`,
+        tag: 'compare_with_cluster.peers',
+      });
+    } catch (err) {
+      return { llmText: `Failed to fetch cluster KPIs: ${(err as Error).message}` };
+    }
+
+    if (!peerRows.length) {
+      return { llmText: `No ${kpiName} data found for cluster ${clusterId} on ${dateId}.` };
+    }
+
+    const vals = peerRows.map((r: any) => Number(r.avg_kpi)).filter(isFinite);
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const std = Math.sqrt(vals.map((v) => (v - mean) ** 2).reduce((a, b) => a + b, 0) / vals.length);
+
+    const sourceIdx = peerRows.findIndex((r: any) => String(r.USID) === usid);
+    const sourceRow = sourceIdx >= 0 ? peerRows[sourceIdx] : null;
+    const sourceVal = sourceRow ? Number(sourceRow.avg_kpi) : null;
+    const rank = sourceIdx >= 0 ? sourceIdx + 1 : null;
+    const pct = rank != null ? Math.round((1 - rank / peerRows.length) * 100) : null;
+    const isOutlier = sourceVal != null && std > 0 && Math.abs(sourceVal - mean) > 2 * std;
+
+    const tableRows = peerRows.map((r: any, i: number) => ({
+      Rank: String(i + 1),
+      USID: String(r.USID),
+      Site: String(r.site_name || '—'),
+      [`Avg ${kpiName}`]: Number(r.avg_kpi).toFixed(2),
+      Anomaly: r.anomaly_flag ? '⚠' : '—',
+      Source: String(r.USID) === usid ? '← THIS SITE' : '',
+    }));
+
+    const rankNote = rank != null
+      ? `USID ${usid} ranks ${rank}/${peerRows.length} in cluster ${clusterId} for ${kpiName} (${pct}th percentile)${isOutlier ? ' — OUTLIER (>2σ below mean)' : ''}.`
+      : `USID ${usid} not found in cluster ${clusterId} KPI data for ${dateId}.`;
+
+    const llmText = clampString(
+      `${rankNote}\n` +
+      `Cluster avg: ${mean.toFixed(2)} | std: ${std.toFixed(2)} | source site: ${sourceVal?.toFixed(2) ?? '—'}\n` +
+      tableRows.map((r) => `  ${r.Rank}. ${r.USID} ${r.Site}: ${r[`Avg ${kpiName}`]}${r.Source ? ' ← THIS SITE' : ''}`).join('\n'),
+    );
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'insight_chart',
+        title: `Cluster Comparison · ${kpiName} · ${dateId}`,
+        data: {
+          title: `${kpiName} — Cluster ${clusterId}`,
+          subtitle: rankNote,
+          echartsOption: {
+            tooltip: { trigger: 'axis' },
+            xAxis: { type: 'category', data: tableRows.map((r) => r.USID), axisLabel: { rotate: 45 } },
+            yAxis: { type: 'value', name: kpiName },
+            series: [{
+              type: 'bar',
+              data: peerRows.map((r: any, i: number) => ({
+                value: Number(r.avg_kpi).toFixed(2),
+                itemStyle: { color: String(r.USID) === usid ? '#f97316' : '#6366f1' },
+              })),
+            }],
+          },
+          height: Math.max(300, peerRows.length * 18),
+        },
+      },
+    };
+  },
+};
+
 // ─── Registry ───────────────────────────────────────────────────────────────
 export const ALL_TOOLS: AgentTool[] = [
   tool_find_site,
@@ -1204,6 +2409,17 @@ export const ALL_TOOLS: AgentTool[] = [
   tool_resolve_kpi_param,
   tool_set_map_layer,
   tool_navigate_to,
+  // Site-analysis tools (deep investigation)
+  tool_get_site_topology,
+  tool_get_config_changes,
+  tool_get_neighbor_relations,
+  tool_get_ret_changes,
+  tool_get_site_outages,
+  tool_get_neighbor_outages,
+  tool_get_hourly_trends,
+  tool_get_kpi_impact_breakdown,
+  tool_get_ticket_history,
+  tool_compare_with_cluster,
 ];
 
 export const TOOLS_BY_NAME: Record<string, AgentTool> = Object.fromEntries(

@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from 'react';
-import { Send, RotateCcw, CheckCircle, AlertTriangle, XCircle, BookOpen, Code2, Map, Radio, ChevronDown, ArrowRight, ChevronRight, X, MessageCircle, Eye, Search, Zap, RefreshCw, Plus, FileText, Image as ImageIcon, LayoutDashboard, BarChart2 } from 'lucide-react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { Send, RotateCcw, CheckCircle, AlertTriangle, XCircle, BookOpen, Code2, Map, Radio, ChevronDown, ArrowRight, ChevronRight, X, MessageCircle, Eye, Search, Zap, RefreshCw, FileText, Image as ImageIcon, LayoutDashboard, BarChart2, Square } from 'lucide-react';
 import { useSavedDashboards } from '../hooks/useSavedDashboards';
 import api from '../services/api';
 import apiWithCache from '../services/apiWithCache';
@@ -552,6 +552,14 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
   const [placeholderIndex, setPlaceholderIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const attachmentInputRef = useRef<HTMLInputElement>(null);
+  // AbortController for the in-flight agent request. The send button turns
+  // into a stop button while a request is running; clicking it aborts.
+  const inflightControllerRef = useRef<AbortController | null>(null);
+  const handleStopRequest = useCallback(() => {
+    inflightControllerRef.current?.abort();
+    inflightControllerRef.current = null;
+    setIsLoading(false);
+  }, []);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const scrollPinnedRef = useRef<boolean>(true);
@@ -604,10 +612,9 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
     return `${colHint}\n\nSample (first ${Math.min(12, lines.length)} lines):\n${sample}`;
   };
 
-  const openAttachmentPicker = () => {
-    setAttachmentError(null);
-    attachmentInputRef.current?.click();
-  };
+  // openAttachmentPicker was removed for v1.0 (no multi-modal). The hidden
+  // input + handlers stay in place so reintroducing the + button later is a
+  // single-line change in the composer.
 
   const removePendingAttachment = (id: string) => {
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
@@ -1325,9 +1332,11 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
     // Timeframe
     const timeframe: 'daily' | 'hourly' = /\bhourly\b/i.test(lower) ? 'hourly' : 'daily';
 
-    // Days back
+    // Days back — match the dashboard's default of 30d for daily / 48h for hourly.
     const daysMatch = q.match(/\b(\d+)\s*(?:days?|d)\b/i);
-    const daysBack = daysMatch ? Math.min(90, Math.max(1, parseInt(daysMatch[1], 10))) : 21;
+    const daysBack = daysMatch
+      ? Math.min(90, Math.max(1, parseInt(daysMatch[1], 10)))
+      : (timeframe === 'hourly' ? 48 : 30);
 
     // Named KPIs — scan for exact name, label word, or KPI group name in query
     const kpiNames: string[] = [];
@@ -2099,12 +2108,19 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
       let agentResponse: any;
       if (useV3) {
         const schemaCtx = schemaRef.current ? `\n${schemaRef.current}` : '';
+        // Replace any prior in-flight controller so the stop button always
+        // targets the most recent request.
+        inflightControllerRef.current?.abort();
+        const controller = new AbortController();
+        inflightControllerRef.current = controller;
         const v3 = await api.agentV3Chat({
           threadId: sessionId,
           message: schemaCtx ? `${query}${schemaCtx}` : query,
           currentView: currentView || 'home',
           stream,
-        });
+        }, { signal: controller.signal });
+        // Clear the ref now that this request landed successfully.
+        if (inflightControllerRef.current === controller) inflightControllerRef.current = null;
         // Adapt v3 shape → v2 shape so the existing renderer just works.
         agentResponse = {
           threadId: v3.threadId,
@@ -2912,6 +2928,22 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
         }
       }
     } catch (error: any) {
+      // User-initiated abort (clicked the Stop button) — silent, no error toast.
+      const isAborted =
+        error?.name === 'AbortError' ||
+        error?.name === 'CanceledError' ||
+        error?.code === 'ERR_CANCELED' ||
+        (typeof error?.message === 'string' && error.message.toLowerCase() === 'canceled');
+      if (isAborted) {
+        const assistantMessage: ChatMessage = {
+          id: (Date.now() + 1).toString(),
+          role: 'assistant',
+          content: '_Request stopped._',
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, assistantMessage]);
+        return;
+      }
       const msg = (error.response?.data?.error?.message || error.message || '').toLowerCase();
       const code = (error.response?.data?.error?.code || '').toUpperCase();
       const isIncomplete =
@@ -2933,6 +2965,7 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
       setMessages((prev) => [...prev, assistantMessage]);
     } finally {
       setIsLoading(false);
+      inflightControllerRef.current = null;
       feedbackTimeoutRef.current = setTimeout(() => setFeedback(null), 6000);
     }
   };
@@ -3167,7 +3200,8 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
       const endDateRaw = parts[3];
       const endDate = (endDateRaw && endDateRaw !== 'undefined') ? endDateRaw : undefined;
       const timeframe = (parts[4] === 'hourly' ? 'hourly' : 'daily') as 'daily' | 'hourly';
-      const daysBack = parseInt(parts[5] ?? '21', 10) || 21;
+      const fallbackDays = timeframe === 'hourly' ? 48 : 30;
+      const daysBack = parseInt(parts[5] ?? String(fallbackDays), 10) || fallbackDays;
       const kpiNames = isStandard ? [] : [parts.slice(6).join('_')].filter(Boolean);
       const label = kpiNames.length > 0
         ? kpiNames.map((n) => KPI_MAP[n]?.label || n).join(', ')
@@ -3913,15 +3947,7 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
                     <div
                       className="chat-input-box relative flex items-center gap-3 rounded-2xl px-4 py-3.5 transition-all duration-200"
                     >
-                      {/* Plus button */}
-	                      <button
-	                        type="button"
-	                        onClick={openAttachmentPicker}
-	                        className="flex-shrink-0 p-1.5 text-text-muted dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors rounded hover:bg-slate-100 dark:hover:bg-white/10"
-	                        title="Attach CSV or image"
-	                      >
-	                        <Plus className="w-5 h-5" />
-	                      </button>
+                      {/* Attach (+) button removed for v1.0 — multi-modal not supported. */}
 
 	                      {/* Saved Dashboards button */}
 	                      <button
@@ -3964,18 +3990,31 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
 	                        rows={1}
 	                      />
 
-                      <button
-                        type="submit"
-                        disabled={!inputValue.trim() || isLoading}
-                        className={`flex-shrink-0 p-2 rounded-lg transition-all duration-200 transform ${
-                          !inputValue.trim() || isLoading
-                            ? 'text-text-muted dark:text-slate-500 cursor-not-allowed opacity-50'
-                            : 'bg-text-primary text-cream-surface dark:text-[#0A0A0A] hover:opacity-90 shadow-sm cursor-pointer active:scale-95'
-                        }`}
-                        title="Send"
-                      >
-                        <Send className="w-5 h-5" />
-	                      </button>
+                      {isLoading ? (
+                        <button
+                          type="button"
+                          onClick={handleStopRequest}
+                          title="Stop"
+                          aria-label="Stop"
+                          className="relative flex-shrink-0 p-2 rounded-lg bg-text-primary text-cream-surface dark:text-[#0A0A0A] hover:opacity-90 shadow-sm cursor-pointer active:scale-95 transition-all duration-200 transform"
+                        >
+                          <span className="pointer-events-none absolute inset-0 rounded-lg border-2 border-current border-t-transparent animate-spin opacity-70" aria-hidden />
+                          <Square className="w-3.5 h-3.5 fill-current relative" strokeWidth={0} />
+                        </button>
+                      ) : (
+                        <button
+                          type="submit"
+                          disabled={!inputValue.trim()}
+                          className={`flex-shrink-0 p-2 rounded-lg transition-all duration-200 transform ${
+                            !inputValue.trim()
+                              ? 'text-text-muted dark:text-slate-500 cursor-not-allowed opacity-50'
+                              : 'bg-text-primary text-cream-surface dark:text-[#0A0A0A] hover:opacity-90 shadow-sm cursor-pointer active:scale-95'
+                          }`}
+                          title="Send"
+                        >
+                          <Send className="w-5 h-5" />
+                        </button>
+                      )}
 	                    </div>
 	                    {(pendingAttachments.length > 0 || attachmentError) && (
 	                      <div className="mt-2 space-y-1 text-left">
@@ -4072,18 +4111,31 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
                       rows={1}
                     />
 
-                    <button
-                      type="submit"
-                      disabled={!inputValue.trim() || isLoading}
-                      className={`flex-shrink-0 p-2 rounded-lg transition-all duration-200 ${
-                        !inputValue.trim() || isLoading
-                          ? 'bg-slate-200/60 dark:bg-gray-700/30 text-text-muted dark:text-gray-600 cursor-not-allowed'
-                          : 'bg-text-primary text-cream-surface dark:text-[#0A0A0A] hover:opacity-90 hover:shadow-md cursor-pointer active:scale-95'
-                      }`}
-                      title="Send"
-                    >
-                      <Send className="w-4 h-4" />
-                    </button>
+                    {isLoading ? (
+                      <button
+                        type="button"
+                        onClick={handleStopRequest}
+                        title="Stop"
+                        aria-label="Stop"
+                        className="relative flex-shrink-0 p-2 rounded-lg bg-text-primary text-cream-surface dark:text-[#0A0A0A] hover:opacity-90 hover:shadow-md cursor-pointer active:scale-95 transition-all duration-200"
+                      >
+                        <span className="pointer-events-none absolute inset-0 rounded-lg border-2 border-current border-t-transparent animate-spin opacity-70" aria-hidden />
+                        <Square className="w-3 h-3 fill-current relative" strokeWidth={0} />
+                      </button>
+                    ) : (
+                      <button
+                        type="submit"
+                        disabled={!inputValue.trim()}
+                        className={`flex-shrink-0 p-2 rounded-lg transition-all duration-200 ${
+                          !inputValue.trim()
+                            ? 'bg-slate-200/60 dark:bg-gray-700/30 text-text-muted dark:text-gray-600 cursor-not-allowed'
+                            : 'bg-text-primary text-cream-surface dark:text-[#0A0A0A] hover:opacity-90 hover:shadow-md cursor-pointer active:scale-95'
+                        }`}
+                        title="Send"
+                      >
+                        <Send className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
                 </form>
               </div>
@@ -4222,14 +4274,7 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
 	                </div>
 	              )}
 	            <div className="chat-input-box flex items-center gap-3 rounded-2xl px-4 py-4 transition-all duration-200">
-	              <button
-	                type="button"
-	                onClick={openAttachmentPicker}
-	                className="flex-shrink-0 p-1.5 text-text-muted dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors rounded hover:bg-slate-100 dark:hover:bg-white/10"
-	                title="Attach CSV or image"
-	              >
-	                <Plus className="w-5 h-5" />
-	              </button>
+	              {/* Attach (+) button removed for v1.0 — multi-modal not supported. */}
 	              <button
 	                type="button"
 	                onClick={() => {
@@ -4270,18 +4315,31 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
               />
 
               <div className="flex items-center space-x-2 ml-3">
-                <button
-                  type="submit"
-                  disabled={!inputValue.trim() || isLoading}
-                  className={`p-2 rounded-full transition-all duration-150 ${
-                    !inputValue.trim() || isLoading
-                      ? 'bg-slate-200/60 dark:bg-white/8 text-text-muted dark:text-slate-500 cursor-not-allowed'
-                      : 'bg-text-primary text-cream-surface dark:text-[#0A0A0A] hover:opacity-90 cursor-pointer shadow-sm active:scale-95'
-                  }`}
-                  title="Send"
-                >
-                  <Send className="w-5 h-5" />
-                </button>
+                {isLoading ? (
+                  <button
+                    type="button"
+                    onClick={handleStopRequest}
+                    title="Stop"
+                    aria-label="Stop"
+                    className="relative p-2 rounded-full bg-text-primary text-cream-surface dark:text-[#0A0A0A] hover:opacity-90 cursor-pointer shadow-sm active:scale-95 transition-all duration-150"
+                  >
+                    <span className="pointer-events-none absolute inset-0 rounded-full border-2 border-current border-t-transparent animate-spin opacity-70" aria-hidden />
+                    <Square className="w-3.5 h-3.5 fill-current relative" strokeWidth={0} />
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={!inputValue.trim()}
+                    className={`p-2 rounded-full transition-all duration-150 ${
+                      !inputValue.trim()
+                        ? 'bg-slate-200/60 dark:bg-white/8 text-text-muted dark:text-slate-500 cursor-not-allowed'
+                        : 'bg-text-primary text-cream-surface dark:text-[#0A0A0A] hover:opacity-90 cursor-pointer shadow-sm active:scale-95'
+                    }`}
+                    title="Send"
+                  >
+                    <Send className="w-5 h-5" />
+                  </button>
+                )}
 
                 <div className={`w-2 h-2 rounded-full ${isLoading ? 'bg-warning-600 animate-pulse' : 'bg-emerald-600'}`} aria-hidden />
 

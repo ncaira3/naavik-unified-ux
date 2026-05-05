@@ -52,9 +52,60 @@ export interface AgentV3ChatResponse {
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
-const MAX_ITERATIONS = 6;
-const MODEL = process.env.OPENAI_AGENT_MODEL || 'gpt-4.1-mini';
+// 8 is enough for the deep workflow when the LLM batches in parallel
+// (find_site → 3 parallel batches × 1 iter each → cluster compare → synthesis).
+// Going higher just lets the model burn LLM round-trips without producing more value.
+const MAX_ITERATIONS = 8;
+const MODEL = process.env.OPENAI_AGENT_MODEL || 'gpt-4o-mini';
 const MAX_HISTORY_TURNS = 12; // user+assistant message pairs to keep in context
+
+/**
+ * Detects whether an assistant message follows the deep-investigation
+ * synthesis format (Severity / Headline / What Changed / What Degraded / etc.).
+ * Matches both `## Header`, `**Header**`, and `Header:` styles.
+ */
+function hasStructuredSynthesis(text: string): boolean {
+  const headerPattern = /(^|\n)\s*(?:#{1,4}\s*|\*\*|__)?\s*(severity|headline|what\s+changed|what\s+degraded|likely\s+root\s+cause|root\s+cause|next\s+actions|recommend)/i;
+  const matches = text.match(new RegExp(headerPattern.source, 'gi'));
+  // Need at least 3 distinct section markers — guards against accidental matches.
+  return !!matches && matches.length >= 3;
+}
+
+/**
+ * Pull the one-sentence headline out of a structured synthesis. Looks for
+ * "## Headline" (or its bold/colon variants) and returns the first non-empty
+ * line below it. Falls back to the first non-empty line if no header found.
+ */
+function extractHeadline(text: string): string {
+  const lines = text.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    const isHeadlineHeader =
+      /^#{1,4}\s*headline\b/i.test(line) ||
+      /^\*\*\s*headline\s*\*\*/i.test(line) ||
+      /^headline\s*:/i.test(line);
+    if (!isHeadlineHeader) continue;
+    // Try the inline form: `Headline: site is stable...`
+    const inline = line.replace(/^[#*\s]*headline[\s:]*\**\s*/i, '').replace(/\*\*$/, '').trim();
+    if (inline) return inline;
+    // Otherwise look at the next non-empty, non-header lines
+    for (let j = i + 1; j < lines.length; j++) {
+      const next = lines[j].trim();
+      if (!next) continue;
+      if (/^#{1,4}\s/.test(next) || /^\*\*[A-Z]/.test(next)) break;
+      return next.replace(/^[*_`]+|[*_`]+$/g, '').trim();
+    }
+    break;
+  }
+  // Fallback: first meaningful line of the synthesis
+  for (const l of lines) {
+    const t = l.replace(/^[#\-*•\s]+/, '').replace(/\*\*/g, '').trim();
+    if (t.length > 8 && !/^(severity|what changed|what degraded|root cause|next action)/i.test(t)) {
+      return t.slice(0, 200);
+    }
+  }
+  return '';
+}
 
 function buildSystemPrompt(): string {
   const today = new Date().toISOString().slice(0, 10);
@@ -73,6 +124,12 @@ Guidelines:
 - When showing site diagnostics (KPIs, RCA, dashboard), prefer show_kpi_dashboard
   for a rich in-chat experience. Use get_site_kpis for a quick numeric snapshot.
 - Keep assistant text concise — rich data goes into UI blocks automatically.
+- CRITICAL: When tool calls return UI blocks (data tables, severity meters,
+  topology grids, KPI dashboards), DO NOT repeat their contents as bullet lists
+  in your response text. The user already sees the visual cards. Your text
+  response should be at most 1–2 sentences when UI blocks are present.
+  Do NOT echo cell names, KPI values, band lists, anomaly counts, or topology
+  details that the UI block already shows. Just call out the headline insight.
 - Dates default to ${todayMinus3} when unspecified; that's our freshest reliable data.
 - If a tool returns no data or an error, either try a related tool or tell the
   user plainly — don't fabricate results.
@@ -86,6 +143,54 @@ Guidelines:
   dashboard for...", "full analysis of..."), use generate_report — it builds
   a multi-panel tabbed report with several charts.
 - Prefer query_data over manually constructing SQL or guessing results.
+
+Deep site investigation workflow:
+When asked to "analyse", "investigate", "diagnose", "what's wrong with", or "give me a full picture of" a site, follow this sequence — batching independent calls in parallel (see below):
+  Step A (parallel): get_site_topology + get_site_outages + get_kpi_impact_breakdown
+  Step B (parallel): get_hourly_trends (last 3 days, kpiNames: ["DL_DRB_TPUT","HOSR","DATA_RAN_ACC"]) + get_config_changes (last 7 days) + get_ret_changes (last 14 days)
+  Step C (parallel): get_neighbor_relations + get_neighbor_outages
+  Step D: compare_with_cluster for the most-impacted KPI from Step A
+  Step E: synthesise all findings into a structured diagnosis using EXACTLY the markdown format below.
+Use get_ticket_history if the user mentions a ticket number or ongoing incident.
+
+Synthesis output format (REQUIRED for deep investigation requests):
+Always output the synthesis using EXACTLY these six markdown headers (in this order). Each section MUST be present. Keep each section to 1–4 short bullet points or sentences — concise, no fluff. Do NOT add any introductory paragraph before "## Headline". Do NOT add any other sections (no "Topology", "Hourly KPI Trends", "Cells", "Bands", etc. — that data is already shown in the UI blocks above).
+
+## Severity
+One word: critical | major | minor | nominal. Pick based on outages + anomaly count + KPI impact.
+
+## Headline
+A single sentence (≤ 18 words) summarizing the top finding.
+
+## What Changed
+- Bullet list of recent config / RET / topology changes that may matter, with old→new where known.
+
+## What Degraded
+- Bullet list of KPIs / CQX sub-components that are anomalous or off-target. Include numeric deltas.
+
+## Likely Root Cause
+- 1–3 bullet points naming the most probable cause(s), grounded in the tool data.
+
+## Next Actions
+- 1–3 concrete next steps for the operator (validate, rollback, escalate, monitor).
+
+DO NOT include any other markdown sections, raw tool data dumps, cell-by-cell statistics, band lists, or anything that the UI blocks already render visually. If a section has no data, write a single bullet "- None detected." rather than skipping or listing tool output.
+
+Parallel tool calls:
+When you need multiple independent data points for the same site, request ALL of them in a single response using parallel tool calls — do NOT call them one at a time if they don't depend on each other's results. The system executes parallel tool calls concurrently so batching saves significant time.
+
+New site-analysis tools (use these for deep diagnosis):
+- get_site_topology: cell inventory, bands (lowband/midband/5G NR), azimuths, anomaly flags
+- get_config_changes: parameter change log (Old→New) with impact analysis
+- get_neighbor_relations: handover distribution, top neighbors, HO concentration
+- get_ret_changes: antenna tilt snapshots across two dates — detects tilt changes per sector
+- get_site_outages: cell-level outage events (metric type, hour) + site outage flag
+- get_neighbor_outages: which neighbors have outages and their HO share of this site
+- get_hourly_trends: multi-cell, multi-day hourly KPI time series with anomaly flagging and LLM narrative
+- get_kpi_impact_breakdown: CQX sub-component impact scores — tells you where to dig next
+- get_ticket_history: trouble tickets by category and status
+- compare_with_cluster: site KPI vs cluster peers — confirm if issue is isolated or cluster-wide
+- get_ret_changes: use when symptoms suggest coverage change (HOSR drop, unexpected throughput pattern, interference)
 
 KPI / CM parameter resolution (IMPORTANT):
 - The DataDict catalog indexes 16,038 Ericsson EIAP telco_RAN parameters (KPIs and CM attributes).
@@ -194,43 +299,67 @@ export class AgentOrchestratorV3 {
         break;
       }
 
-      // Execute each tool call the LLM requested.
-      for (const toolCall of msg.tool_calls) {
-        if (toolCall.type !== 'function') continue;
-        const name = toolCall.function.name;
-        const tool = TOOLS_BY_NAME[name];
-        let parsedArgs: Record<string, any> = {};
-        try {
-          parsedArgs = toolCall.function.arguments
-            ? JSON.parse(toolCall.function.arguments)
-            : {};
-        } catch {
-          parsedArgs = {};
-        }
-        trace.push({ type: 'tool_call', name, args: parsedArgs });
+      // Execute all tool calls for this iteration concurrently.
+      const functionCalls = msg.tool_calls.filter((tc) => tc.type === 'function');
 
-        let resultText = '';
-        if (!tool) {
-          resultText = `Error: tool "${name}" is not registered.`;
-        } else {
+      type ToolOutcome = {
+        toolCall: (typeof functionCalls)[number];
+        name: string;
+        resultText: string;
+        uiBlock?: UiBlockSuggestion;
+        uiCommand?: UiCommandSuggestion;
+      };
+
+      const settled = await Promise.allSettled(
+        functionCalls.map(async (toolCall): Promise<ToolOutcome> => {
+          const name = toolCall.function.name;
+          let parsedArgs: Record<string, any> = {};
+          try {
+            parsedArgs = toolCall.function.arguments
+              ? JSON.parse(toolCall.function.arguments)
+              : {};
+          } catch {
+            parsedArgs = {};
+          }
+          trace.push({ type: 'tool_call', name, args: parsedArgs });
+
+          const tool = TOOLS_BY_NAME[name];
+          if (!tool) {
+            return { toolCall, name, resultText: `Error: tool "${name}" is not registered.` };
+          }
           try {
             const result = await tool.execute(parsedArgs, toolCtx);
-            resultText = result.llmText;
-            if (result.uiBlock) uiBlocks.push(result.uiBlock);
-            if (result.uiCommand) uiCommands.push(result.uiCommand);
+            return {
+              toolCall,
+              name,
+              resultText: result.llmText,
+              uiBlock: result.uiBlock,
+              uiCommand: result.uiCommand,
+            };
           } catch (err) {
-            resultText = `Tool "${name}" threw: ${(err as Error).message}`;
             logger.warn(`[agent-v3] tool ${name} failed`, err);
+            return { toolCall, name, resultText: `Tool "${name}" threw: ${(err as Error).message}` };
           }
-        }
-        trace.push({ type: 'tool_result', name, summary: resultText.slice(0, 200) });
+        }),
+      );
 
-        // Append the tool result so the next LLM call can see it.
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: resultText,
-        });
+      // Collect results in order; append tool messages for the next LLM call.
+      for (const outcome of settled) {
+        const { toolCall, name, resultText, uiBlock, uiCommand } =
+          outcome.status === 'fulfilled'
+            ? outcome.value
+            : {
+                toolCall: (outcome as any).reason?.toolCall ?? functionCalls[0],
+                name: '?',
+                resultText: `Tool threw: ${(outcome as PromiseRejectedResult).reason?.message ?? 'unknown error'}`,
+                uiBlock: undefined,
+                uiCommand: undefined,
+              };
+
+        if (uiBlock) uiBlocks.push(uiBlock);
+        if (uiCommand) uiCommands.push(uiCommand);
+        trace.push({ type: 'tool_result', name, summary: resultText.slice(0, 200) });
+        messages.push({ role: 'tool', tool_call_id: toolCall.id, content: resultText });
       }
     }
 
@@ -240,6 +369,31 @@ export class AgentOrchestratorV3 {
         assistantMessage =
           "I made several tool calls but couldn't quite close this out. Here's what I found along the way.";
       }
+    }
+
+    // If the synthesis follows the structured "## Severity / ## Headline / …"
+    // format, surface it as a `diagnosis_card` UI block AND replace the chat
+    // message with just the headline so we don't render the same content twice.
+    if (assistantMessage && hasStructuredSynthesis(assistantMessage)) {
+      const fullSynthesis = assistantMessage;
+      uiBlocks.unshift({
+        type: 'diagnosis_card',
+        title: 'Diagnosis',
+        data: {
+          synthesis: fullSynthesis,
+          context: currentView ? `View: ${currentView}` : undefined,
+        },
+      });
+      // Extract just the headline for the chat-bubble text.
+      const headline = extractHeadline(fullSynthesis);
+      assistantMessage = headline || 'Investigation complete — see diagnosis below.';
+    } else if (assistantMessage && uiBlocks.length >= 2 && assistantMessage.length > 400) {
+      // Even without the structured format: if the agent produced rich UI blocks,
+      // the long text is almost always duplicated tool output. Trim it to a brief
+      // one-liner so the chat doesn't read like a wall of bullets.
+      const firstLine = assistantMessage.split(/\r?\n/).find((l) => l.trim().length > 8) || '';
+      const trimmed = firstLine.replace(/^[#\-*•\s]+/, '').replace(/\*\*/g, '').trim();
+      if (trimmed) assistantMessage = trimmed.slice(0, 200);
     }
 
     // Persist full turn history so the next request has real conversation context.
