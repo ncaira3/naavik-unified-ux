@@ -240,6 +240,138 @@ Same pattern for `resolveSiteSlot` (against `topology_cache_sites`), `resolveDat
 
 ---
 
+## Part F — Query Cost Gating (the 41-second problem)
+
+A second hallucination-adjacent failure mode is the *expensive* successful query. Example from the chat:
+
+> *"show me UL RSSI"* → ran `SELECT TOP 50 CAST(DATE_ID AS DATE) as date, cell_name, AVG(kpi_value) as avg_ul_rssi FROM intermediate_kpi_table WITH (NOLOCK)` — **41,159 ms**, 50 rows from 50 unrelated cells across the entire network. No `USID` filter. The user got a chart, but it's noise — 50 random cells averaged together.
+
+Two things broke at once:
+1. **Unbounded query** — no `USID` filter, so the engine scanned the full table.
+2. **No cost feedback to the user** — they stared at a spinner for 41 seconds with no signal that this was expensive or that they could have constrained it.
+
+The user shouldn't have to guess. The agent should refuse, warn, or constrain *before* hitting the DB.
+
+### F.1 — Cardinality + cost estimator
+
+New service `backend/src/services/query-cost-estimator.service.ts`. Given a parsed SQL query, it returns:
+
+```ts
+interface CostEstimate {
+  estimatedRows: number;       // rows scanned (not returned)
+  estimatedMs: number;         // expected wall-clock
+  warningLevel: 'green' | 'yellow' | 'red';
+  reasons: string[];           // why it's expensive
+  suggestions: string[];       // ways to bound it
+}
+```
+
+Heuristics:
+- Look up table cardinality from the mirror (`SELECT reltuples FROM pg_class` for local; cached counts for remote).
+- Detect missing required filters per table:
+  - `intermediate_kpi_table` → must have `USID` AND (date range ≤ 90 days OR `kpi_name` filter).
+  - `hourly_intermediate_kpis_table` → must have `USID` AND date range ≤ 7 days.
+  - `subcomponent_table` → must have `USID` OR `DATE_ID` (single date).
+  - `site_table` → must have `USID` OR `DATE_ID`.
+- Estimate scan size: `(table_rows × selectivity_factor)`. Selectivity factors per filter type (USID = 0.0001, date = 0.03/day, kpi_name = 0.02).
+- Estimate ms: `~1 ms per 1000 rows for index-backed scans, ~50 ms per 1000 rows for full scans`.
+
+Tiers:
+- 🟢 **green** (≤ 2 s, ≤ 10k rows scanned) — execute silently.
+- 🟡 **yellow** (2–15 s OR ≤ 100k rows) — execute but surface "Took X seconds, scanned ~Y rows. Add a filter to make this faster next time" as a small footnote on the result.
+- 🔴 **red** (> 15 s OR > 100k rows OR missing required filter) — DO NOT execute. Emit a `cost_warning` UI block with the reasons + suggested constraints.
+
+### F.2 — `cost_warning` UI block
+
+A new generative UI block that renders the cost concern as a small card with action chips:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ ⚠ This query might be expensive                          │
+│                                                          │
+│ I'd be scanning ~3.2M rows across 6,806 sites.           │
+│ Estimated time: ~45 seconds.                             │
+│                                                          │
+│ Quick fixes:                                             │
+│ [ Pick a site ]  [ Last 7 days ]  [ Top 50 offenders ]  │
+│ [ Run anyway ]  [ Cancel ]                              │
+└─────────────────────────────────────────────────────────┘
+```
+
+The chips emit pre-filled follow-up prompts (or set the `force_unbounded: true` flag for "Run anyway"). The conversation pauses until the user picks one.
+
+### F.3 — Required-filter enforcement in the SQL gate
+
+Update `SQLGeneratorService.validateSQL` to detect missing required filters per table and reject the query before it leaves the backend:
+
+```ts
+const REQUIRED_FILTERS: Record<string, string[]> = {
+  intermediate_kpi_table: ['USID'],
+  hourly_intermediate_kpis_table: ['USID', 'DATE_ID'],
+  subcomponent_table: ['USID', 'DATE_ID'],
+  configuration_parameters_table: ['USID'],
+  outage_table: ['USID', 'DATE_ID'],
+};
+```
+
+When a required filter is missing AND the user didn't explicitly ask for "all sites / entire network", the validator returns `unbounded` → the orchestrator emits the `cost_warning` block.
+
+### F.4 — Live progress for queries that ARE expected to be slow
+
+Even with cost gating, some queries legitimately take 5–30 s (e.g. a 7-day hourly trend across multiple cells). Instead of a vague spinner:
+
+1. The tool emits an `execution_status` UI block before executing.
+2. The block streams updates: "Resolving KPI → Validating filters → Running query (8s elapsed of ~12s estimated) → Aggregating results".
+3. If the actual time exceeds 2× the estimate, the status flips to "Taking longer than expected" with a Cancel button.
+
+### F.5 — Auto-bound defaults at the intent layer
+
+For each Intent (Part B), define a `defaultBounds` function that fills in sensible bounds when the user didn't specify any:
+
+- `KPIChartIntent.defaultBounds()`: site = required (no default), date range = last 30 days, daysBack = 30 daily / 48h hourly.
+- `SiteAnalysisIntent.defaultBounds()`: date = today − 3.
+- `WorstOffendersIntent.defaultBounds()`: date = today − 3, limit = 50.
+
+If a required slot has no default (like `site` for `KPIChartIntent`), the slot resolver asks. If a slot has a default, the agent uses it and **shows it in the plan card** so the user knows what assumption was made.
+
+### F.6 — Walk-through of the fixed UL_RSSI flow with cost gating
+
+**User:** *"show me UL RSSI"*
+
+1. Intent classifier picks `kpi_chart`.
+2. Slot resolver: `kpi=UL_RSSI` (resolved after clarification chip), `site=null`, `timeframe=daily`, `daysBack=30 (default)`.
+3. Required slot `site` is null → emit `slot_prompt`: *"Which site? Pick from the top 5 offenders or search:"* + chips.
+
+**User clicks USID 9787.**
+
+4. Slots complete: `kpi=UL_RSSI`, `site=9787`, `daysBack=30`.
+5. Cost estimator runs against the synthesized query (USID filter + 30 day range + kpi_name filter on `intermediate_kpi_table`): estimated 90 rows, 80 ms. 🟢 green → execute silently.
+6. Plan card pinned: `✓ kpi: UL_RSSI · ✓ site: 9787 · ✓ window: 30 days (default)`.
+7. Chart renders in under 1 second showing UL_RSSI daily for USID 9787 across its cells.
+
+**Compare to today:** the user gets a 41-second wait, no warning, a chart of 50 unrelated cells, and no idea what went wrong.
+
+### F.7 — Phase + effort additions to Part E
+
+| Phase | Scope | Duration | Risk |
+|---|---|---|---|
+| **F1** | `query-cost-estimator.service.ts` with cardinality + heuristics | 1 day | Low |
+| **F2** | Required-filter enforcement in `SQLGeneratorService.validateSQL` | half day | Low |
+| **F3** | `cost_warning` UI block (frontend + type) | half day | Low |
+| **F4** | Live `execution_status` streaming for slow queries | 1 day | Med (needs streaming infra) |
+| **F5** | `defaultBounds` per intent (depends on Part B intents existing) | half day | Low — bolt-on to B2 |
+
+Total new work: ~3.5 days, **most of which lands in the same A-phase window so demos in week 1 already have cost gating.**
+
+### F.8 — Telemetry to validate this is working
+
+Add a `query_cost_log` table in PG capturing:
+- threadId, intent, generated SQL, estimated ms, actual ms, scanned rows, tier (green/yellow/red), user action (executed / cancelled / refined).
+
+Use it to tune the heuristics weekly. The first week's data will show where the estimator is over- or under-estimating.
+
+---
+
 ## Part D — Risks and open decisions
 
 1. **Performance:** every chat turn now runs the slot resolver before any LLM. The resolver hits two in-memory indexes (DataDict + schema names) — ~5 ms. Acceptable.
@@ -276,6 +408,16 @@ Total: ~12–13 working days for a clean v1. Part A alone (~2.5 days) stops the 
 
 ## Recommendation
 
-Do **Part A this week** so the demo stops hallucinating. Schedule **Part B starting next week** as a 2–3 sprint commit; it's a real refactor and shouldn't be rushed.
+Do **Part A + Part F this week** so the demo stops hallucinating *and* stops surprising the user with 41-second silent scans. Schedule **Part B starting next week** as a 2–3 sprint commit; it's a real refactor and shouldn't be rushed.
 
-If you want, I can start Part A1 (the pre-flight gate) right now — it's the single highest-leverage change against the bug in your screenshot.
+The week-1 bundle (Part A + Part F):
+- A1 — pre-flight schema gate (1d)
+- A2 — SQL output validator (1d)
+- A3 — chart-generator sanity check (½d)
+- F1 — cost estimator (1d)
+- F2 — required-filter enforcement (½d)
+- F3 — `cost_warning` UI block (½d)
+
+≈ **4.5 days of work** that, on their own, would have prevented both the "fake UL_RSSI bar" hallucination and the "41-second hidden scan" bug from your two screenshots. UI of every chat stays unchanged for week 1 — these are backend-and-block-type changes only.
+
+If you want, I can start with **F2 + F1 + A1** as a coordinated push — those three together would have stopped both your bug screenshots cold.
