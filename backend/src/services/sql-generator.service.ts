@@ -7,6 +7,7 @@ import { pool } from '../config/database.js';
 import { logger } from '../utils/logger.js';
 import { DatabaseSchema, GeneratedSQL, ValidationResult } from '../types/index.js';
 import { SchemaRegistryService } from './schema-registry.service.js';
+import { estimateQueryCost } from './query-cost-estimator.service.js';
 
 const DANGEROUS_KEYWORDS = [
   'DROP', 'DELETE', 'TRUNCATE', 'UPDATE', 'INSERT', 'ALTER', 'CREATE',
@@ -386,10 +387,27 @@ User Query: ${query}`;
       });
     }
 
+    // Cost gating — predict scan size and reject queries that would scan
+    // millions of rows or are missing required filters (USID, DATE_ID, etc.).
+    // The query_data tool catches these and emits a cost_warning UI block
+    // instead of running the query.
+    const cost = estimateQueryCost(sql);
+    if (cost.warningLevel === 'red') {
+      const detail = cost.missingRequiredFilters.length
+        ? `Missing required filter(s): ${cost.missingRequiredFilters.join(', ')}`
+        : `Estimated ${(cost.estimatedMs / 1000).toFixed(0)}s scan of ~${cost.estimatedRows.toLocaleString()} rows`;
+      errors.push(`Cost gate (red): ${detail}`);
+    } else if (cost.warningLevel === 'yellow') {
+      warnings.push(
+        `Slow query: estimated ${(cost.estimatedMs / 1000).toFixed(1)}s for ~${cost.estimatedRows.toLocaleString()} rows. ${cost.suggestions.join(' ')}`,
+      );
+    }
+
     return {
       valid: errors.length === 0,
       errors,
-      warnings
+      warnings,
+      cost,
     };
   }
 

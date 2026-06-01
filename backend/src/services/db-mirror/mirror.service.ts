@@ -74,16 +74,25 @@ class DbMirrorService {
       await ensureLegacyShims();
       this.status.initialized = true;
 
-      // Auto-backfill if any of the larger tables are empty.
-      const empty = await this.isAnyMirrorTableEmpty();
-      if (empty) {
+      // Auto-backfill on startup if:
+      //   a) any mirror table is empty (first run), OR
+      //   b) the freshest row is more than MIRROR_CATCHUP_THRESHOLD days behind today
+      //      (server was down / backfill previously interrupted).
+      const staleDays = await this.mirrorStaleDays();
+      const CATCHUP_THRESHOLD = Number(process.env.MIRROR_CATCHUP_THRESHOLD_DAYS ?? '2');
+      if (staleDays === null) {
         logger.info('[mirror] mirror tables empty — kicking off 30-day backfill in background');
-        // fire-and-forget; the rest of the server starts without waiting
         void this.backfill(DEFAULT_BACKFILL_DAYS).catch((err) =>
           logger.error('[mirror] backfill failed', err),
         );
+      } else if (staleDays > CATCHUP_THRESHOLD) {
+        const catchupDays = Math.min(DEFAULT_BACKFILL_DAYS, staleDays + 1);
+        logger.info(`[mirror] mirror is ${staleDays}d stale — kicking off ${catchupDays}-day catch-up backfill in background`);
+        void this.backfill(catchupDays).catch((err) =>
+          logger.error('[mirror] catch-up backfill failed', err),
+        );
       } else {
-        logger.info('[mirror] mirror already populated — skipping startup backfill');
+        logger.info(`[mirror] mirror is fresh (${staleDays}d stale) — skipping startup backfill`);
       }
 
       this.scheduleDaily();
@@ -160,20 +169,23 @@ class DbMirrorService {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_run_log_run_at ON ${MIRROR_SCHEMA}.run_log (run_at DESC)`);
   }
 
-  /** Are any of the high-cardinality mirror tables empty? Triggers backfill if so. */
-  private async isAnyMirrorTableEmpty(): Promise<boolean> {
-    for (const t of ['site_table', 'intermediate_kpi_table']) {
-      try {
-        const r = await pool.query(
-          `SELECT 1 FROM ${MIRROR_SCHEMA}.${quoteIdent(t)} LIMIT 1`,
-        );
-        if (r.rowCount === 0) return true;
-      } catch {
-        // Table doesn't exist (schema discovery may have failed) — treat as empty.
-        return true;
-      }
+  /**
+   * Returns how many days the mirror is behind today, or null if any key
+   * table is empty (triggering a fresh 30-day backfill instead of catch-up).
+   */
+  private async mirrorStaleDays(): Promise<number | null> {
+    try {
+      const r = await pool.query(
+        `SELECT MAX(date_id)::date AS latest FROM ${MIRROR_SCHEMA}.${quoteIdent('cqx_offenders_truth_table')}`,
+      );
+      const latest: string | null = r.rows[0]?.latest ?? null;
+      if (!latest) return null; // empty table
+      const latestMs = new Date(latest).getTime();
+      const todayMs = new Date(new Date().toISOString().slice(0, 10)).getTime();
+      return Math.max(0, Math.round((todayMs - latestMs) / 86_400_000));
+    } catch {
+      return null; // table missing — treat as empty
     }
-    return false;
   }
 
   /** Pull one calendar day for all mirror tables. */

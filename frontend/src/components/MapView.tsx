@@ -8,7 +8,14 @@ import { useTheme } from '../context/ThemeContext';
 import { useDummifier } from '../context/DummifierContext';
 import type { RCAMapSignals } from './RCAReasoningPanel';
 import type { ProvisioningCandidateSite } from '../types';
+import EventMapOverlay from './LocalEvents/EventMapOverlay';
+import EventDetailPopover from './LocalEvents/EventDetailPopover';
+import EventsLayerControl, { type EventsLayerState } from './LocalEvents/EventsLayerControl';
+import { useLocalEvents } from './LocalEvents/useLocalEvents';
+import type { EventCategory } from '../services/localEvents';
 import 'mapbox-gl/dist/mapbox-gl.css';
+import MapLibre from 'react-map-gl/maplibre';
+import 'maplibre-gl/dist/maplibre-gl.css';
 
 // Mapbox token from environment variable
 const MAPBOX_TOKEN = (import.meta as any).env?.VITE_MAPBOX_TOKEN || '';
@@ -24,6 +31,40 @@ const MAP_STYLES = [
   { id: 'navigation-day', label: 'Navigation Day', desc: 'Optimized for turn-by-turn navigation', style: 'mapbox://styles/mapbox/navigation-day-v1', swatch: '#93c5fd' },
 ] as const;
 type MapStyleId = (typeof MAP_STYLES)[number]['id'];
+
+// ─── External Map Layer providers ─────────────────────────────────────────────
+// MapLibre uses their public demo tiles; Esri uses the ArcGIS World Street Map
+// tile service (free, no key required for reasonable usage).
+// Both are delivered through a secondary MapLibre GL overlay so we get the same
+// view-sync machinery for free.
+export type ExternalMapProvider = 'maplibre' | 'esri';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const ESRI_MAPLIBRE_STYLE: any = {
+  version: 8,
+  glyphs: 'https://fonts.openmaptiles.org/{fontstack}/{range}.pbf',
+  sprite: '',
+  sources: {
+    'esri-world-street': {
+      type: 'raster',
+      tiles: [
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
+      ],
+      tileSize: 256,
+      attribution: 'Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, Intermap, increment P Corp.',
+      maxzoom: 19,
+    },
+  },
+  layers: [
+    {
+      id: 'esri-world-street-layer',
+      type: 'raster',
+      source: 'esri-world-street',
+      minzoom: 0,
+      maxzoom: 24,
+    },
+  ],
+};
 
 function normalizeDateId(value?: string | null): string {
   if (!value) return '';
@@ -216,6 +257,12 @@ export default function MapView({
     setCellSectors,
     dataDateId,
     chatHighlightSiteIds,
+    eventsLayerEnabled,
+    setEventsLayerEnabled,
+    externalMapLayerEnabled: showExternalMapLayer,
+    setExternalMapLayerEnabled: setShowExternalMapLayer,
+    externalMapProvider,
+    setExternalMapProvider,
   } = useMapData();
 
   // Map style: 'auto' or null = follow app theme; otherwise use selected style
@@ -239,6 +286,11 @@ export default function MapView({
     pitch: 0,
     bearing: 0,
   });
+  // External Map Layer — state lives in MapDataContext so chat can toggle it
+  // showExternalMapLayer / externalMapProvider / setShowExternalMapLayer / setExternalMapProvider
+  // are all destructured from useMapData() above.
+  const [externalMapOpacity, setExternalMapOpacity] = useState(0.6);
+  const mapLibreRef = useRef<any>(null);
   const layerPulseRafRef = useRef<number | null>(null);
 
   const [internalSite, setInternalSite] = useState<MapSite | null>(null);
@@ -341,6 +393,8 @@ export default function MapView({
   const [isLoading, setIsLoading] = useState(!isCacheValid(selectedDateId));
   const [minLoadPending, setMinLoadPending] = useState(() => !isCacheValid(selectedDateId));
   const [error, setError] = useState<string | null>(null);
+  // Incrementing this triggers a fresh fetchSites (used by the retry button).
+  const [fetchRetryCount, setFetchRetryCount] = useState(0);
   const [interactionState, setInteractionState] = useState({
     isDragging: false,
     isZooming: false,
@@ -379,8 +433,85 @@ export default function MapView({
   const menuTriggerRef = useRef<HTMLButtonElement>(null);
   const [rightPaddingPx, setRightPaddingPx] = useState(0);
   const [mapSettingsTab, setMapSettingsTab] = useState<'filters' | 'layers' | 'mapOptions' | 'mapType'>('filters');
+  // Local Events layer — compact control near the zoom buttons drives this.
+  // Anchor mode is automatic: if a site is selected we anchor on it, otherwise
+  // we anchor on the current map centre (so engineers can browse "what's
+  // happening this Saturday near here" without picking a site first).
+  const TODAY_ISO = () => new Date().toISOString().slice(0, 10);
+  const PLUS_DAYS = (d: string, n: number) => {
+    const x = new Date(`${d}T00:00:00Z`);
+    x.setUTCDate(x.getUTCDate() + n);
+    return x.toISOString().slice(0, 10);
+  };
+  const [eventsLayer, setEventsLayer] = useState<EventsLayerState>(() => ({
+    // ON by default so users immediately see nearby events on the map.
+    // Anchor starts as 'map' so events load around the map centre before any
+    // site is selected; switches to 'site' as soon as the user clicks a site.
+    enabled: true,
+    startDate: PLUS_DAYS(TODAY_ISO(), -3),
+    endDate: PLUS_DAYS(TODAY_ISO(), 3),
+    radiusMiles: 5,
+    enabledCategories: new Set<EventCategory>([
+      'concert', 'sports', 'festival', 'school', 'conference',
+      'severe-weather', 'news', 'public-holiday',
+    ]),
+    anchorMode: 'map',
+  }));
+  const [hoveredEvent, setHoveredEvent] = useState<{ event: import('../services/localEvents').LocalEvent | null; anchor: { x: number; y: number } | null }>({ event: null, anchor: null });
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
   const [outageSiteIds, setOutageSiteIds] = useState<Set<string>>(new Set());
   const [overutilizedSiteIds, setOverutilizedSiteIds] = useState<Set<string>>(new Set());
+
+  // Sync events layer enabled/disabled from context (allows chat to toggle it).
+  useEffect(() => {
+    setEventsLayer((prev) =>
+      prev.enabled !== eventsLayerEnabled ? { ...prev, enabled: eventsLayerEnabled } : prev
+    );
+  }, [eventsLayerEnabled]);
+
+  // Auto-switch anchor mode when a site is selected/deselected.
+  useEffect(() => {
+    setEventsLayer((prev) => ({
+      ...prev,
+      anchorMode: selectedSite ? 'site' : 'map',
+    }));
+  }, [selectedSite?.siteId]);
+
+  // Drive the events hook from the consolidated state.
+  const eventsAnchorUsid =
+    eventsLayer.enabled && eventsLayer.anchorMode === 'site' && selectedSite
+      ? (selectedSite.realSiteId ?? selectedSite.siteId)
+      : null;
+  const eventsAnchorLat =
+    eventsLayer.enabled && eventsLayer.anchorMode === 'map'
+      ? viewState.latitude
+      : null;
+  const eventsAnchorLng =
+    eventsLayer.enabled && eventsLayer.anchorMode === 'map'
+      ? viewState.longitude
+      : null;
+  const eventsState = useLocalEvents({
+    usid: eventsAnchorUsid,
+    centerLat: eventsAnchorLat,
+    centerLng: eventsAnchorLng,
+    radiusMiles: eventsLayer.radiusMiles,
+    startDate: eventsLayer.startDate,
+    endDate: eventsLayer.endDate,
+    enabled: eventsLayer.enabled,
+  });
+
+  // Apply category filter client-side (cheap, lets the user toggle without
+  // re-fetching the same upstream results).
+  const filteredEvents = useMemo(() => {
+    if (!eventsState.events?.length) return [];
+    return eventsState.events.filter((e) => eventsLayer.enabledCategories.has(e.category));
+  }, [eventsState.events, eventsLayer.enabledCategories]);
+
+  // Reset selection / hover whenever the underlying event list changes or layer is toggled off.
+  useEffect(() => {
+    setHoveredEvent({ event: null, anchor: null });
+    setSelectedEventId(null);
+  }, [eventsState.events, eventsLayer.enabled]);
   const [isDateResolved, setIsDateResolved] = useState(false);
   const autoFocusedDateRef = useRef<string | null>(null);
   const maxAllowedDate = useMemo(() => getDateDaysAgo(3), []);
@@ -509,11 +640,44 @@ export default function MapView({
         setIsLoading(true);
         setError(null);
 
-        // 1, 2 & 3. Fetch sites, offenders, and cell sectors all in parallel
-        const [topoRows, initialSectorRows, compassOffenders] = await Promise.all([
-          api.getCompassSiteTopology(selectedDateId),
-          api.getCompassCellSectors(selectedDateId).catch(() => [] as Array<Record<string, any>>),
-          api.getCompassOffenders(selectedDateId).catch(() => [] as Array<{ USID: string; Total_Impact_to_CQX_Delta: number }>),
+        // Kick off all three requests in parallel, but DO NOT block the
+        // loading screen on the (much larger) cell-sectors payload. Sites
+        // and offenders unlock the map; sectors stream in afterwards and
+        // re-enrich site state when they arrive.
+        const sectorsPromise: Promise<Array<Record<string, any>>> = api
+          .getCompassCellSectors(selectedDateId)
+          .catch(() => [] as Array<Record<string, any>>);
+        // Retry topology up to 3 times with backoff — handles the brief window
+        // where tsx watch is restarting the backend and the proxy returns 404/ECONNRESET.
+        const fetchTopologyWithRetry = async () => {
+          const MAX_ATTEMPTS = 3;
+          let lastErr: unknown;
+          for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+            try {
+              const rows = await api.getCompassSiteTopology(selectedDateId);
+              if (rows.length > 0) return rows;
+              // Empty rows — backend may still be warming up. Wait and retry.
+              if (attempt < MAX_ATTEMPTS - 1) {
+                await new Promise<void>((r) => setTimeout(r, 3_000 * (attempt + 1)));
+                continue;
+              }
+              return rows; // Last attempt — return whatever we got (empty is OK)
+            } catch (err) {
+              lastErr = err;
+              if (attempt < MAX_ATTEMPTS - 1) {
+                await new Promise<void>((r) => setTimeout(r, 3_000 * (attempt + 1)));
+              }
+            }
+          }
+          if (lastErr) throw lastErr;
+          return [];
+        };
+
+        const [topoRows, compassOffenders] = await Promise.all([
+          fetchTopologyWithRetry(),
+          api.getCompassOffenders(selectedDateId).catch(
+            () => [] as Array<{ USID: string; Total_Impact_to_CQX_Delta: number }>,
+          ),
         ]);
 
         const mappedSites: MapSite[] = topoRows.map((row) => ({
@@ -555,9 +719,13 @@ export default function MapView({
         setRankedOffenderIds(ranked.length ? ranked : []);
         setOffenderSiteIds(finalOffenderSet);
 
+        // Sites + offenders are in — let the map paint NOW. Sectors continue
+        // loading in the background and we merge them in below.
+        setIsLoading(false);
+
         // 3. Handle sector fallback if empty (retry latest available date)
         try {
-          let sectorRows = initialSectorRows;
+          let sectorRows = await sectorsPromise;
           // Compass-style fallback: if selected date has no sectors, retry latest available date.
           if (!sectorRows.length) {
             const availableDates = await api.getCompassDates().catch(() => []);
@@ -665,19 +833,15 @@ export default function MapView({
         }
       } catch (error: any) {
         setError(error?.response?.data?.error?.message || error?.message || 'Failed to load map data');
-      } finally {
-        // Enforce 2-second minimum loading screen so it never looks instant
-        const elapsed = Date.now() - loadStart;
-        const remaining = Math.max(0, 2000 - elapsed);
-        if (remaining > 0) {
-          await new Promise((resolve) => setTimeout(resolve, remaining));
-        }
         setIsLoading(false);
+      } finally {
+        const elapsed = Date.now() - loadStart;
+        console.debug(`[MapView] sites+offenders ready in ${elapsed}ms`);
       }
     };
 
     fetchSites();
-  }, [selectedDateId, isDateResolved, dataDateId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedDateId, isDateResolved, dataDateId, fetchRetryCount]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Short minimum so the overlay doesn't flash off before the map tiles paint.
   useEffect(() => {
@@ -844,7 +1008,8 @@ export default function MapView({
 
   const effectiveLayerSiteIds = useMemo(() => {
     let base: Set<string>;
-    if (activeSiteLayer === 'outage') base = outageSiteIds;
+    if (activeSiteLayer === null) base = new Set();
+    else if (activeSiteLayer === 'outage') base = outageSiteIds;
     else if (activeSiteLayer === 'overutilized') base = overutilizedSiteIds;
     else base = effectiveOffenderIds;
     // Merge in any sites highlighted by a chat RCA command
@@ -917,7 +1082,6 @@ export default function MapView({
     }
     // Sort by latitude for band pruning
     pts.sort((a, b) => a.lat - b.lat);
-    const latArr = pts.map((p) => p.lat);
     const MAX_RADIUS = 600; // meters — cap so rural sites aren't enormous
     const MIN_RADIUS = 25;
     const FRACTION = 0.38;
@@ -1391,41 +1555,48 @@ export default function MapView({
     );
   }
 
-  // Error state
-  if (error) {
-    return (
-      <div className="flex-1 flex items-center justify-center bg-cream-bg dark:bg-pulse-bg">
-        <div className="text-center max-w-md p-8 bg-cream-surface dark:bg-pulse-surface border border-border dark:border-pulse-border rounded-lg">
-          <AlertTriangle className="mx-auto mb-4 h-12 w-12 text-red-500" aria-hidden />
-          <h2 className="text-xl font-bold text-text-primary dark:text-text-primary mb-3">
-            Failed to Load Map
-          </h2>
-          <p className="text-sm text-text-secondary dark:text-text-secondary mb-4">
-            {error}
-          </p>
-          <button
-            onClick={() => window.location.reload()}
-            className="px-4 py-2 rounded-lg transition text-sm text-white"
-            style={{
-              background: 'rgb(var(--ui-btn-rgb))',
-              color: 'rgb(var(--ui-btn-fg-rgb))',
-            }}
-          >
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div ref={containerRef} className="flex-1 min-h-0 relative">
+      {/* Dismissable error banner — floats over the map instead of replacing it.
+          This lets the user retry without losing their map state, and avoids a
+          blank screen when a temporary backend restart caused the 404. */}
+      {error && !isLoading && (
+        <div className="absolute top-4 left-1/2 z-50 -translate-x-1/2 flex items-center gap-3 rounded-xl border border-red-200 bg-white/95 px-4 py-3 shadow-lg dark:border-red-800/60 dark:bg-slate-900/95 backdrop-blur-sm max-w-md w-[calc(100%-2rem)]">
+          <AlertTriangle className="h-5 w-5 shrink-0 text-red-500" aria-hidden />
+          <span className="flex-1 text-sm text-slate-700 dark:text-slate-200 min-w-0 truncate">{error}</span>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => {
+                setError(null);
+                setIsLoading(true);
+                setFetchRetryCount((n) => n + 1);
+              }}
+              className="rounded-md bg-indigo-600 px-3 py-1 text-xs font-semibold text-white hover:bg-indigo-700 transition-colors"
+            >
+              Retry
+            </button>
+            <button
+              onClick={() => setError(null)}
+              aria-label="Dismiss"
+              className="rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors dark:hover:bg-slate-800 dark:hover:text-slate-300"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
       <MapGL
         ref={mapRef}
         initialViewState={viewState as any}
         padding={rightPaddingPx > 0 ? { left: 0, right: rightPaddingPx, top: 0, bottom: 0 } : undefined}
         // Compass guideline: keep map largely uncontrolled for smooth pan/zoom.
         // Persist view state only on moveend/zoomend.
+        onMove={(evt) => {
+          if (showExternalMapLayer) {
+            const { longitude, latitude, zoom, pitch, bearing } = evt.viewState as any;
+            mapLibreRef.current?.jumpTo({ center: [longitude, latitude], zoom, pitch, bearing });
+          }
+        }}
         onMoveEnd={(evt) => {
           setInteractionState({ isDragging: false, isZooming: false });
           setViewState(evt.viewState as any);
@@ -1940,7 +2111,47 @@ export default function MapView({
           </Source>
         )}
 
+        {/* Local Events overlay — radius circle + event pins.
+            Hover reveals a popover (rendered outside <MapGL> via portal). */}
+        {eventsLayer.enabled && eventsState.centerLat != null && eventsState.centerLng != null && (
+          <EventMapOverlay
+            centerLat={eventsState.centerLat}
+            centerLng={eventsState.centerLng}
+            radiusMiles={eventsLayer.radiusMiles}
+            events={filteredEvents}
+            hoveredEventId={hoveredEvent.event?.id ?? null}
+            selectedEventId={selectedEventId}
+            onHover={(event, anchor) => setHoveredEvent({ event, anchor })}
+            onMarkerClick={(e) => setSelectedEventId(e.id)}
+          />
+        )}
+
         </MapGL>
+
+      {/* ── External Map Layer (MapLibre or Esri) ─────────────────────── */}
+      {showExternalMapLayer && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            zIndex: 1,
+            pointerEvents: 'none',
+            opacity: externalMapOpacity,
+          }}
+        >
+          <MapLibre
+            ref={mapLibreRef}
+            initialViewState={viewState}
+            style={{ width: '100%', height: '100%' }}
+            mapStyle={
+              externalMapProvider === 'esri'
+                ? ESRI_MAPLIBRE_STYLE
+                : 'https://demotiles.maplibre.org/style.json'
+            }
+            attributionControl={false}
+          />
+        </div>
+      )}
 
       {(isLoading || minLoadPending) && (
         <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center">
@@ -2333,7 +2544,7 @@ export default function MapView({
                   <div className="rounded-xl bg-red-500/20 dark:bg-red-900/30 p-4 border border-red-500/30 dark:border-red-500/20">
                     <div className="text-2xl font-bold text-red-700 dark:text-red-400">{effectiveLayerSiteIds.size.toLocaleString()}</div>
                     <div className="text-xs text-red-600 dark:text-red-400">
-                      {activeSiteLayer === 'degraded' ? 'DEGRADED' : activeSiteLayer === 'outage' ? 'OUTAGE SITES' : 'OVERUTILIZED SITES'}
+                      {activeSiteLayer === 'degraded' ? 'DEGRADED' : activeSiteLayer === 'outage' ? 'OUTAGE SITES' : activeSiteLayer === 'overutilized' ? 'OVERUTILIZED SITES' : 'HIGHLIGHTED'}
                     </div>
                   </div>
                 </div>
@@ -2345,7 +2556,7 @@ export default function MapView({
                 <div className="space-y-2">
                   <label className="text-sm font-semibold text-text-primary dark:text-white">Map Layers</label>
                   <button
-                    onClick={() => setActiveSiteLayer('outage')}
+                    onClick={() => setActiveSiteLayer(activeSiteLayer === 'outage' ? null : 'outage')}
                     className={`w-full flex items-center justify-between p-3 rounded-lg transition-all ${
                       activeSiteLayer === 'outage'
                         ? 'bg-cream-surface-light dark:bg-slate-700/50 border border-slate-400/50'
@@ -2358,7 +2569,7 @@ export default function MapView({
                     </span>
                   </button>
                   <button
-                    onClick={() => setActiveSiteLayer('overutilized')}
+                    onClick={() => setActiveSiteLayer(activeSiteLayer === 'overutilized' ? null : 'overutilized')}
                     className={`w-full flex items-center justify-between p-3 rounded-lg transition-all ${
                       activeSiteLayer === 'overutilized'
                         ? 'bg-orange-100 dark:bg-orange-900/30 border border-orange-400/50'
@@ -2371,7 +2582,7 @@ export default function MapView({
                     </span>
                   </button>
                   <button
-                    onClick={() => setActiveSiteLayer('degraded')}
+                    onClick={() => setActiveSiteLayer(activeSiteLayer === 'degraded' ? null : 'degraded')}
                     className={`w-full flex items-center justify-between p-3 rounded-lg transition-all ${
                       activeSiteLayer === 'degraded'
                         ? 'bg-red-100 dark:bg-red-900/30 border border-red-400/50'
@@ -2415,6 +2626,83 @@ export default function MapView({
                       {showRecentProvisionedLayer ? 'ON' : 'OFF'}
                     </span>
                   </button>
+                  <button
+                    onClick={() => { const next = !eventsLayer.enabled; setEventsLayer((prev) => ({ ...prev, enabled: next })); setEventsLayerEnabled(next); }}
+                    className={`w-full flex items-center justify-between p-3 rounded-lg transition-all ${
+                      eventsLayer.enabled
+                        ? 'bg-indigo-100 dark:bg-indigo-900/30 border border-indigo-400/50'
+                        : 'bg-cream-surface-light dark:bg-pulse-surface-light hover:bg-gray-200 dark:hover:bg-pulse-border'
+                    }`}
+                    title="Toggle local events overlay"
+                  >
+                    <div className="flex flex-col items-start">
+                      <span className="text-sm text-text-primary dark:text-white">Local Events</span>
+                      <span className="text-[10px] text-text-muted dark:text-gray-400">
+                        Concerts, sports, weather, news within {eventsLayer.radiusMiles} mi
+                      </span>
+                    </div>
+                    <span className={`px-2 py-1 rounded text-xs font-medium ${eventsLayer.enabled ? 'bg-indigo-600 text-white' : 'bg-gray-300 dark:bg-gray-600 text-text-secondary dark:text-gray-300'}`}>
+                      {eventsLayer.enabled ? 'ON' : 'OFF'}
+                    </span>
+                  </button>
+                  {/* ── External Map Layer ─────────────────────────────── */}
+                  <button
+                    onClick={() => setShowExternalMapLayer(!showExternalMapLayer)}
+                    className={`w-full flex items-center justify-between p-3 rounded-lg transition-all ${
+                      showExternalMapLayer
+                        ? 'bg-indigo-100 dark:bg-indigo-900/30 border border-indigo-400/50'
+                        : 'bg-cream-surface-light dark:bg-pulse-surface-light hover:bg-gray-200 dark:hover:bg-pulse-border'
+                    }`}
+                  >
+                    <span className="text-sm text-text-primary dark:text-white">External Map Layer</span>
+                    <span className={`px-2 py-1 rounded text-xs font-medium ${showExternalMapLayer ? 'bg-indigo-600 text-white' : 'bg-gray-300 dark:bg-gray-600 text-text-secondary dark:text-gray-300'}`}>
+                      {showExternalMapLayer ? 'ON' : 'OFF'}
+                    </span>
+                  </button>
+                  {showExternalMapLayer && (
+                    <div className="space-y-2 px-1 pb-1">
+                      {/* Provider picker */}
+                      <div>
+                        <p className="text-xs text-text-muted dark:text-gray-400 mb-1.5">Provider</p>
+                        <div className="flex gap-2">
+                          {(['maplibre', 'esri'] as ExternalMapProvider[]).map((p) => (
+                            <button
+                              key={p}
+                              onClick={() => setExternalMapProvider(p)}
+                              className={`flex-1 py-1.5 rounded-md text-xs font-semibold capitalize transition-all border ${
+                                externalMapProvider === p
+                                  ? 'bg-indigo-600 text-white border-indigo-600'
+                                  : 'bg-transparent text-text-secondary dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:border-indigo-400 hover:text-indigo-500 dark:hover:text-indigo-300'
+                              }`}
+                            >
+                              {p === 'maplibre' ? 'MapLibre' : 'Esri'}
+                            </button>
+                          ))}
+                        </div>
+                        <p className="text-[10px] text-text-muted dark:text-gray-500 mt-1">
+                          {externalMapProvider === 'esri'
+                            ? 'Esri World Street Map · ArcGIS tile service'
+                            : 'MapLibre demo tiles · OpenStreetMap-based'}
+                        </p>
+                      </div>
+                      {/* Opacity slider */}
+                      <div>
+                        <label className="flex justify-between text-xs text-text-muted dark:text-gray-400 mb-1">
+                          <span>Overlay Opacity</span>
+                          <span>{Math.round(externalMapOpacity * 100)}%</span>
+                        </label>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          value={externalMapOpacity}
+                          onChange={(e) => setExternalMapOpacity(parseFloat(e.target.value))}
+                          className="w-full accent-indigo-600"
+                        />
+                      </div>
+                    </div>
+                  )}
                   <button
                     onClick={() => setShowLegend(!showLegend)}
                     className="w-full flex items-center justify-between p-3 rounded-lg bg-cream-surface-light dark:bg-pulse-surface-light hover:bg-gray-200 dark:hover:bg-pulse-border transition-all"
@@ -2579,7 +2867,7 @@ export default function MapView({
             <div className="flex items-center space-x-2">
               <div className="w-3 h-3 rounded-full" style={{ backgroundColor: layerHighlightColor }} />
               <span className="text-text-primary dark:text-text-primary">
-                {activeSiteLayer === 'degraded' ? 'Degraded Sites (blinking)' : activeSiteLayer === 'outage' ? 'Outage Sites' : 'Overutilized Sites'}
+                {activeSiteLayer === 'degraded' ? 'Degraded Sites (blinking)' : activeSiteLayer === 'outage' ? 'Outage Sites' : activeSiteLayer === 'overutilized' ? 'Overutilized Sites' : 'Highlighted Sites'}
               </span>
             </div>
             {showProvisioningLayer && (
@@ -2729,6 +3017,26 @@ export default function MapView({
           {queueNotice}
         </div>
       )}
+
+      {/* Local Events compact control — sits just above the zoom buttons in
+          the top-right corner of the map. Replaces the old docked side panel
+          (which was overlapping the right-hand context info). */}
+      {eventsLayer.enabled && (
+        <div className="absolute right-3 top-4 z-30 flex flex-col items-end gap-2">
+          <EventsLayerControl
+            state={eventsLayer}
+            onChange={setEventsLayer}
+            selectedSiteLabel={selectedSite ? `USID ${dId(selectedSite.realSiteId ?? selectedSite.siteId)}` : null}
+            loading={eventsState.loading}
+            totalEvents={eventsState.events.length}
+            filteredEvents={filteredEvents.length}
+          />
+        </div>
+      )}
+
+      {/* Hover popover (portal-mounted to body, so the map's overflow can't
+          clip it and it floats over any side panels). */}
+      <EventDetailPopover event={hoveredEvent.event} anchor={hoveredEvent.anchor} />
     </div>
   );
 }

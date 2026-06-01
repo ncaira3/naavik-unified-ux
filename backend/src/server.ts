@@ -3,6 +3,7 @@
  * Main entry point for Express API
  */
 import express, { Express } from 'express';
+import compression from 'compression';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { testConnection, getTableCounts, initializeDemoViews } from './config/database.js';
@@ -40,6 +41,9 @@ import mirrorRoutes from './routes/mirror.routes.js';
 import platformRoutes from './routes/platform.routes.js';
 import compassRoutes from './routes/compass.routes.js';
 import analyticsRoutes from './routes/analytics.routes.js';
+import docsRoutes from './routes/docs.routes.js';
+import localEventsRoutes from './routes/local-events.routes.js';
+import integrationsRoutes from './routes/integrations.routes.js';
 import { appgenTokenRouter, appgenProxy } from './routes/appgen-proxy.routes.js';
 import { AppSettingsService } from './services/app-settings.service.js';
 import { PlatformRegistryService } from './services/platform-registry.service.js';
@@ -70,6 +74,10 @@ app.use(cors({
   },
   credentials: true,
 }));
+
+// gzip/deflate every response above 1 KB. Knocks the cell-sectors payload
+// from ~6-10 MB down to ~600 KB-1 MB and shaves seconds off cold map loads.
+app.use(compression({ threshold: 1024 }));
 
 // Body parsing
 app.use(express.json({ limit: '3mb' }));
@@ -146,6 +154,9 @@ app.use('/api/mirror', authenticateToken, mirrorRoutes);
 app.use('/api/platform', authenticateToken, platformRoutes);
 app.use('/api/compass', authenticateToken, compassRoutes);
 app.use('/api/analytics', authenticateToken, analyticsRoutes);
+app.use('/api/docs', authenticateToken, docsRoutes);
+app.use('/api/local-events', authenticateToken, localEventsRoutes);
+app.use('/api/integrations', authenticateToken, integrationsRoutes);
 app.use('/api/test', authenticateToken, testRoutes);
 
 // AppGen integration routes and proxy
@@ -222,12 +233,24 @@ async function startServer() {
 
     // Run heavy initialization in the background so dev login is never blocked.
     void (async () => {
-      // Test database connection
-      logger.info('Testing database connection...');
-      const dbConnected = await testConnection();
+      // Wait until PostgreSQL is actually accepting connections before starting
+      // any service that needs it.  First-time Docker container init can take
+      // 30–90 s; this loop retries for up to 120 s with exponential back-off.
+      logger.info('Waiting for database to be ready…');
+      const DB_WAIT_MAX_MS = 120_000;
+      const DB_WAIT_START = Date.now();
+      let dbConnected = false;
+      let dbDelay = 1_000;
+      while (Date.now() - DB_WAIT_START < DB_WAIT_MAX_MS) {
+        dbConnected = await testConnection();
+        if (dbConnected) break;
+        logger.warn(`Database not ready — retrying in ${dbDelay / 1000}s…`);
+        await new Promise((r) => setTimeout(r, dbDelay));
+        dbDelay = Math.min(dbDelay * 2, 15_000); // cap at 15 s
+      }
 
       if (!dbConnected) {
-        logger.error('Database connection failed. API calls may fail.');
+        logger.error('Database did not become ready within 120 s — some features will be unavailable.');
       } else {
         const counts = await getTableCounts();
         logger.info('Database table counts:');
@@ -296,6 +319,22 @@ async function startServer() {
       } catch (error) {
         logger.error('Failed to initialize platform registry service.');
         logger.error('Error:', error);
+      }
+
+      // External-tool integrations — secret store + MCP + A2A registries.
+      // Failures here MUST NOT block the rest of startup; non-essential.
+      logger.info('Initializing integrations (secrets, MCP, A2A)…');
+      try {
+        const { getSecretProvider } = await import('./services/secrets/index.js');
+        await getSecretProvider();
+        const { mcpRegistry } = await import('./services/mcp-client/registry.service.js');
+        await mcpRegistry.init();
+        const { a2aRegistry } = await import('./services/a2a-client/registry.service.js');
+        await a2aRegistry.init();
+        logger.info('Integrations ready');
+      } catch (error) {
+        logger.warn('Integrations init failed — external tools will be unavailable until configured.');
+        logger.warn(String((error as Error).message || error));
       }
 
       logger.info('Refreshing DB schema reference (KPI + subcomponent names)…');

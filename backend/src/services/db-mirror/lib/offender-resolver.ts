@@ -6,7 +6,8 @@
 import { NaavikDBConnector } from '../../naavik-db-connector.service.js';
 import { logger } from '../../../utils/logger.js';
 
-const remoteDb = new NaavikDBConnector();
+// Mirror sync needs more time than interactive agent queries — use 30 s.
+const remoteDb = new NaavikDBConnector(undefined, 30_000);
 
 /** YYYY-MM-DD in only — caller must validate. */
 export async function getOffendersForDate(dateId: string): Promise<string[]> {

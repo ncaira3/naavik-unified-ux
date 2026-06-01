@@ -636,10 +636,20 @@ function buildKpiChartOption(
     axisLabel: { ...baseLabelStyle, rotate: 30, hideOverlap: true, formatter: formatDateLabel },
   };
 
+  // Compute 99th-percentile max so a single outlier cell doesn't collapse
+  // all other traces to the bottom of the Y-axis.
+  const allVals = model.traces
+    .flatMap((trace) => model.labels.map((label) => model.valueFor(trace, label)))
+    .filter((v): v is number => v != null);
+  allVals.sort((a, b) => a - b);
+  const p99 = allVals.length > 0 ? allVals[Math.max(0, Math.floor(allVals.length * 0.99) - 1)] : null;
+  const yMax = p99 != null && p99 > 0 ? Math.ceil(p99 * 1.1) : undefined;
+
   return {
     ...toneBase,
     grid: { left: 52, right: 24, top: 36, bottom: isHourlyLabels ? 56 : 44 },
     xAxis: { ...(toneBase.xAxis as object), data: model.labels, ...xAxisOverride },
+    yAxis: { ...(toneBase.yAxis as object), ...(yMax != null ? { max: yMax } : {}) },
     series: model.traces.map((trace, i) => ({
       name: trace,
       type: 'line',

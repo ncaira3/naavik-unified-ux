@@ -77,10 +77,23 @@ const DEFAULT_REGISTRY: AppRegistryEntry[] = [
     isActive: true,
   },
   {
+    id: 'docs',
+    displayName: 'Docs',
+    iconName: 'BookOpen',
+    order: 5,
+    containerType: 'internal',
+    internalKey: 'docs',
+    chatStream: 'universal',
+    navAliases: ['docs', 'documentation', 'help', 'reference', 'guide'],
+    navSemanticPatterns: ['open documentation', 'show docs', 'help me', 'where is the manual'],
+    requiresRole: 'user',
+    isActive: true,
+  },
+  {
     id: 'settings',
     displayName: 'Settings',
     iconName: 'Settings',
-    order: 5,
+    order: 6,
     containerType: 'internal',
     internalKey: 'settings',
     requiresRole: 'user',
@@ -99,7 +112,7 @@ function ensureMemoryRegistry(): AppRegistryEntry[] {
 
 export class PlatformRegistryService {
   static async initialize(): Promise<void> {
-    const MAX_ATTEMPTS = 6;
+    const MAX_ATTEMPTS = 10;
     const BASE_DELAY_MS = 1000;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {

@@ -48,7 +48,10 @@ class ApiService {
     this.client.interceptors.response.use(
       (response) => response,
       (error) => {
-        if (error.response?.status === 401) {
+        const status = error.response?.status;
+        const code = error.response?.data?.error?.code;
+        // 401 = no token; 403 with INVALID_TOKEN = stale/corrupt JWT — clear and re-login
+        if (status === 401 || (status === 403 && code === 'INVALID_TOKEN')) {
           this.clearAuth();
           window.location.href = '/';
         }

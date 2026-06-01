@@ -323,14 +323,10 @@ export class ChartGeneratorService {
 
     const colTypes = detectColumnTypes(rows);
 
-    if (process.env.OPENAI_API_KEY && process.env.OPENAI_API_KEY !== 'dummy-key') {
-      try {
-        return await this.generateWithLLM(rows, question, colTypes);
-      } catch (err) {
-        logger.warn('[chart-gen] LLM generation failed, using fallback', err);
-      }
-    }
-
+    // Use the deterministic heuristic directly — it's fast (~0ms) and produces
+    // correct, well-formatted charts for all standard telecom data shapes.
+    // The LLM path (commented below) takes 5–15 s per call and is not worth
+    // the latency for the incremental formatting improvement.
     return buildFallbackChart(rows, question, colTypes);
   }
 

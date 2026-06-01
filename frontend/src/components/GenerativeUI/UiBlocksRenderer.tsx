@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { UiBlock } from '../../types';
 import { emitChip } from '../../utils/uiBlocks';
+import FollowupChips, { type FollowupChip } from './Followups/FollowupChips';
 import InteractiveGridTable from '../Chat/ReportComponents/InteractiveGridTable';
 import InlineMap from '../InlineMap';
 import RcaSiteStoryCard from '../Chat/ReportComponents/RcaSiteStoryCard';
@@ -10,6 +11,7 @@ import { WorkflowExecutionStatus } from '../Chat/ReportComponents/WorkflowExecut
 import ChatKpiDashboard from '../Chat/ReportComponents/ChatKpiDashboard';
 import CompactTable from './CompactTable';
 import DiagnosisCard from './DiagnosisCard';
+import RecommendationCard from './RecommendationCard';
 import SeverityMeter from './SeverityMeter';
 import TopologyGrid from './TopologyGrid';
 import InsightChartCard from '../Chat/ReportComponents/InsightChartCard';
@@ -237,6 +239,21 @@ function UiBlockRenderer({ block }: { block: UiBlock }) {
     return <Callout tone={block.data.tone} title={block.data.title} text={block.data.text} />;
   }
   if (block.type === 'chips') {
+    // Conversation-builder chips carry structured `needs` per chip — route to
+    // the FollowupChips component which expands an inline form when needed.
+    const variant = (block.data as any)?.variant;
+    const chips = (block.data as any)?.chips ?? [];
+    const hasStructured =
+      variant === 'followups' ||
+      chips.some((c: any) => Array.isArray(c?.needs) && c.needs.length > 0);
+    if (hasStructured) {
+      return (
+        <FollowupChips
+          chips={chips as FollowupChip[]}
+          prompt={block.data.prompt}
+        />
+      );
+    }
     return <Chips chips={block.data.chips} prompt={block.data.prompt} />;
   }
   if (block.type === 'stat_row') {
@@ -271,6 +288,10 @@ function UiBlockRenderer({ block }: { block: UiBlock }) {
   }
   if (block.type === 'diagnosis_card') {
     return <DiagnosisCard synthesis={block.data.synthesis} context={block.data.context} />;
+  }
+  if (block.type === 'recommendation_card') {
+    const d = block.data as any;
+    return <RecommendationCard siteId={d.siteId} date={d.date} plan={d.plan} />;
   }
   if (block.type === 'severity_meter') {
     return (
@@ -332,6 +353,7 @@ function UiBlockRenderer({ block }: { block: UiBlock }) {
     return (
       <ChatKpiDashboard
         siteId={d.siteId}
+        availableSiteIds={d.availableSiteIds}
         kpiNames={d.kpiNames}
         timeframe={d.timeframe ?? 'daily'}
         daysBack={d.daysBack ?? 30}
@@ -363,14 +385,80 @@ function isPairableCompactTable(block: UiBlock): boolean {
   return rows.length <= 30 && cols.length <= 4;
 }
 
+/**
+ * If the agent emitted multiple `kpi_dashboard` blocks (typically one per
+ * site), collapse them into a single block with a USID switcher. Long lists
+ * of stacked dashboards take up too much vertical space; one dashboard with
+ * a switcher is what the user actually wants.
+ */
+function collapseKpiDashboards(blocks: UiBlock[]): UiBlock[] {
+  let firstIdx = -1;
+  let count = 0;
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i]?.type === 'kpi_dashboard') {
+      if (firstIdx < 0) firstIdx = i;
+      count += 1;
+    }
+  }
+  if (count <= 1) return blocks;
+
+  // Merge all kpi_dashboard blocks into one — siteId from the first block,
+  // availableSiteIds = union of all siteIds across blocks, kpiNames = union.
+  const dashboards = blocks.filter((b) => b.type === 'kpi_dashboard');
+  const first: any = dashboards[0].data ?? {};
+  const allSites: string[] = [];
+  const allKpis: string[] = [];
+  for (const d of dashboards) {
+    const data: any = d.data ?? {};
+    if (data.siteId && !allSites.includes(data.siteId)) allSites.push(data.siteId);
+    if (Array.isArray(data.availableSiteIds)) {
+      for (const s of data.availableSiteIds) if (s && !allSites.includes(s)) allSites.push(s);
+    }
+    if (Array.isArray(data.kpiNames)) {
+      for (const k of data.kpiNames) if (k && !allKpis.includes(k)) allKpis.push(k);
+    }
+  }
+  const merged: UiBlock = {
+    ...dashboards[0],
+    data: {
+      ...first,
+      siteId: first.siteId ?? allSites[0],
+      availableSiteIds: allSites.length > 1 ? allSites : undefined,
+      kpiNames: allKpis.length ? allKpis : first.kpiNames,
+    },
+  };
+
+  // Re-insert the merged dashboard at the position of the FIRST dashboard
+  // and strip the rest. Preserves the ordering of all non-dashboard blocks.
+  const out: UiBlock[] = [];
+  let placed = false;
+  for (const b of blocks) {
+    if (b.type === 'kpi_dashboard') {
+      if (!placed) {
+        out.push(merged);
+        placed = true;
+      }
+      // Skip subsequent dashboards
+    } else {
+      out.push(b);
+    }
+  }
+  return out;
+}
+
 export default function UiBlocksRenderer({ blocks }: { blocks: UiBlock[] }) {
+  // Pre-pass: collapse any stacked `kpi_dashboard` blocks into a single one.
+  // This is the user-visible "I want one dashboard, not N" guarantee even if
+  // the agent slips up and emits multiple.
+  const collapsed = collapseKpiDashboards(blocks);
+
   // Walk the blocks list and emit either:
   //  - a single full-width block, or
   //  - a 2-col row when two pairable compact tables are adjacent
   const grouped: Array<{ kind: 'single'; block: UiBlock } | { kind: 'pair'; blocks: [UiBlock, UiBlock] }> = [];
-  for (let i = 0; i < blocks.length; i++) {
-    const cur = blocks[i];
-    const next = blocks[i + 1];
+  for (let i = 0; i < collapsed.length; i++) {
+    const cur = collapsed[i];
+    const next = collapsed[i + 1];
     if (cur && next && isPairableCompactTable(cur) && isPairableCompactTable(next)) {
       grouped.push({ kind: 'pair', blocks: [cur, next] });
       i += 1;

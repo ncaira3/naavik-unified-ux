@@ -72,6 +72,12 @@ export type UiCommandAction =
   | { type: 'SET_DATE_FILTER'; dateId: string }
   /** Switch the active site layer (degraded / outage / overutilized) */
   | { type: 'SET_MAP_LAYER'; layer: 'degraded' | 'outage' | 'overutilized' }
+  /** Clear / hide the active site layer — show all sites */
+  | { type: 'CLEAR_MAP_LAYER' }
+  /** Toggle the local events (concerts, weather, news) overlay on the map */
+  | { type: 'TOGGLE_EVENTS_LAYER'; enabled?: boolean }
+  /** Toggle or switch the external base-map overlay (MapLibre / Esri) */
+  | { type: 'TOGGLE_EXTERNAL_MAP'; enabled?: boolean; provider?: 'maplibre' | 'esri' }
   // ── Generative UI: app navigation ─────────────────────────────────────────
   /** Navigate to a top-level app view */
   | { type: 'NAVIGATE_VIEW'; view: 'observe' | 'appgen' | 'provision' | 'settings' | 'home' };
@@ -219,7 +225,8 @@ export type UiBlockType =
   | 'code_view'
   | 'insight_chart'
   | 'rca_summary'
-  | 'rca_report';
+  | 'rca_report'
+  | 'recommendation_card';
 
 export interface UiBlockBase {
   type: UiBlockType;
@@ -230,7 +237,25 @@ export interface UiBlockBase {
 export type UiBlock =
   | (UiBlockBase & { type: 'text'; data: { text: string } })
   | (UiBlockBase & { type: 'callout'; data: { tone: 'info' | 'success' | 'warning' | 'error'; title?: string; text: string } })
-  | (UiBlockBase & { type: 'chips'; data: { prompt?: string; chips: Array<{ label: string; value: string; description?: string }> } })
+  | (UiBlockBase & { type: 'chips'; data: { prompt?: string; variant?: string; chips: Array<{
+      label: string;
+      // `value` is the legacy literal-prompt-to-fire; new chips carry `prompt`
+      // (template) plus optional `needs` (inline conversation form).
+      value: string;
+      prompt?: string;
+      description?: string;
+      intent?: string;
+      needs?: Array<{
+        id: string;
+        text: string;
+        mode: 'single' | 'multi' | 'free';
+        options?: Array<{ key: string; label: string; description?: string }>;
+        allowFreeText?: boolean;
+        placeholder?: string;
+        defaultValue?: string;
+        required?: boolean;
+      }>;
+    }> } })
   | (UiBlockBase & { type: 'stat_row'; data: { items: Array<{ label: string; value: string; hint?: string }> } })
   | (UiBlockBase & { type: 'data_table'; data: { title?: string; rows: Array<Record<string, any>>; rowTooltipField?: string; disableRowActions?: boolean } })
   | (UiBlockBase & { type: 'compact_table'; data: { title?: string; subtitle?: string; rows: Array<Record<string, any>>; columnOrder?: string[]; columnHints?: Record<string, 'numeric' | 'text' | 'anomaly' | 'mono'>; maxHeight?: number } })
@@ -250,7 +275,31 @@ export type UiBlock =
   | (UiBlockBase & { type: 'code_view'; data: { code: string; language?: string } })
   | (UiBlockBase & { type: 'insight_chart'; data: { title?: string; subtitle?: string; source?: string; height?: number; echartsOption: Record<string, any> } })
   | (UiBlockBase & { type: 'rca_summary'; data: any })
-  | (UiBlockBase & { type: 'rca_report'; data: any });
+  | (UiBlockBase & { type: 'rca_report'; data: any })
+  | (UiBlockBase & { type: 'recommendation_card'; data: {
+      siteId?: string;
+      date?: string;
+      plan: {
+        category?: string;
+        confidenceLevel?: 'high' | 'medium' | 'low';
+        headline?: string;
+        reasoning?: string;
+        freeText?: string;
+        parameters: Array<{
+          paramName: string;
+          scope?: string;
+          direction?: string;
+          deltaText?: string;
+          description?: string;
+          possibleImpact?: string;
+          possibleChange?: string;
+          dataType?: string;
+          sources: Array<'rca-text' | 'datadict' | 'rca-knowledge'>;
+        }>;
+        actions?: any[];                          // strategy-emitted action plan
+        alternatives?: Array<{ bucket: string; confidence: number }>;
+      };
+    } });
 
 // Chat message types
 export interface ChoiceButton {

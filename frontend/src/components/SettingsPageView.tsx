@@ -19,7 +19,9 @@ import {
   Package,
   Database,
   Play,
+  Plug,
 } from 'lucide-react';
+import IntegrationsTab from './Settings/IntegrationsTab';
 import { AgGridReact } from 'ag-grid-react';
 import type { ColDef } from 'ag-grid-community';
 import { themeQuartz } from 'ag-grid-community';
@@ -182,7 +184,7 @@ export default function SettingsPageView() {
   const { currentOperator, allOperators, setOperator } = useTenant();
   const { user } = useAuth();
   const { enabled: dummifierEnabled, toggle: toggleDummifier, dId: demoUsidPreview } = useDummifier();
-  const [activeTab, setActiveTab] = useState<'appearance' | 'appgen' | 'profile' | 'admin' | 'apps' | 'data'>('appearance');
+  const [activeTab, setActiveTab] = useState<'appearance' | 'appgen' | 'profile' | 'integrations' | 'admin' | 'apps' | 'data'>('appearance');
   const [_editingUser, _setEditingUser] = useState<User | null>(null);
   const [_showAddUserModal, setShowAddUserModal] = useState(false);
 
@@ -562,6 +564,7 @@ export default function SettingsPageView() {
             { id: 'appearance' as const, label: 'Appearance', icon: Monitor },
             { id: 'appgen' as const, label: 'AppGen', icon: Plus },
             { id: 'profile' as const, label: 'Profile', icon: User },
+            { id: 'integrations' as const, label: 'Integrations', icon: Plug },
             ...(IS_ADMIN || isAdmin
               ? [
                   { id: 'admin' as const, label: 'Admin Panel', icon: Shield },
@@ -831,6 +834,22 @@ export default function SettingsPageView() {
                 </button>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Integrations (MCP + A2A) */}
+        {activeTab === 'integrations' && (
+          <div className="space-y-6">
+            <div>
+              <h2 className="text-lg font-semibold text-text-light-primary dark:text-text-primary flex items-center gap-2">
+                <Plug className="w-5 h-5 text-tenant-primary" />
+                Integrations
+              </h2>
+              <p className="mt-1 text-[13px] text-text-light-secondary dark:text-text-secondary">
+                External MCP servers Naavik consumes for tools, and A2A agents Naavik can delegate workflows to.
+              </p>
+            </div>
+            <IntegrationsTab />
           </div>
         )}
 

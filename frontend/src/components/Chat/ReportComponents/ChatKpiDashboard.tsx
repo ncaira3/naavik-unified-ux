@@ -8,7 +8,7 @@ import type { EChartsOption } from 'echarts';
 import {
   BarChart2, Clock, Calendar, RefreshCw, ChevronDown, ChevronUp,
   AlertCircle, Loader2, X, Check, Bookmark, BookmarkCheck,
-  Plus, ChevronRight, Users,
+  Plus, ChevronRight, Users, Search, Database,
 } from 'lucide-react';
 import api from '../../../services/api';
 import { useTheme } from '../../../context/ThemeContext';
@@ -602,6 +602,20 @@ function SaveDashboardModal({ initial, onSave, onCancel, isDark }: SaveDashboard
 
 // ── KPI selector overlay ──────────────────────────────────────────────────────
 
+// Cache the DB catalog at module scope so reopening the picker doesn't refetch.
+let CATALOG_CACHE: string[] | null = null;
+async function loadKpiCatalog(): Promise<string[]> {
+  if (CATALOG_CACHE) return CATALOG_CACHE;
+  try {
+    const resp = await api.get<{ success: boolean; data: { names: string[] } }>('/kpis/catalog');
+    const names = resp?.data?.names ?? [];
+    CATALOG_CACHE = names;
+    return names;
+  } catch {
+    return [];
+  }
+}
+
 function KpiSelector({ selected, onApply, onCancel, isDark }: {
   selected: string[];
   onApply: (kpis: string[]) => void;
@@ -609,7 +623,58 @@ function KpiSelector({ selected, onApply, onCancel, isDark }: {
   isDark: boolean;
 }) {
   const [local, setLocal] = useState<string[]>(selected);
-  const toggle = (name: string) => setLocal((prev) => prev.includes(name) ? prev.filter((k) => k !== name) : [...prev, name]);
+  const [query, setQuery] = useState('');
+  const [catalog, setCatalog] = useState<string[]>(CATALOG_CACHE ?? []);
+  const [catalogLoading, setCatalogLoading] = useState(!CATALOG_CACHE);
+  const toggle = (name: string) =>
+    setLocal((prev) => (prev.includes(name) ? prev.filter((k) => k !== name) : [...prev, name]));
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!CATALOG_CACHE) {
+      setCatalogLoading(true);
+      loadKpiCatalog().then((names) => {
+        if (cancelled) return;
+        setCatalog(names);
+        setCatalogLoading(false);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ── Filter / search logic ────────────────────────────────────────────────
+  // Standard groups are kept intact when there's no search. When the user
+  // searches, we filter standard + DB catalog into a single ranked list.
+  const standardNameSet = useMemo(
+    () => new Set(ALL_STANDARD_KPIS.map((k) => k.name)),
+    [],
+  );
+  const customCatalog = useMemo(
+    () => catalog.filter((n) => !standardNameSet.has(n)),
+    [catalog, standardNameSet],
+  );
+
+  const trimmedQuery = query.trim().toUpperCase();
+  const searchResults = useMemo(() => {
+    if (!trimmedQuery) return [] as { name: string; label: string; group: 'standard' | 'custom' }[];
+    const matches: { name: string; label: string; group: 'standard' | 'custom' }[] = [];
+    for (const k of ALL_STANDARD_KPIS) {
+      if (
+        k.name.toUpperCase().includes(trimmedQuery) ||
+        k.label.toUpperCase().includes(trimmedQuery)
+      ) {
+        matches.push({ name: k.name, label: k.label, group: 'standard' });
+      }
+    }
+    for (const name of customCatalog) {
+      if (name.toUpperCase().includes(trimmedQuery)) {
+        matches.push({ name, label: name.replace(/_/g, ' '), group: 'custom' });
+      }
+    }
+    return matches.slice(0, 80);
+  }, [trimmedQuery, customCatalog]);
 
   const sTextPrimary   = isDark ? '#F0EDE8' : '#2D2A26';
   const sTextSecondary = isDark ? '#B8B3AB' : '#4A4641';
@@ -621,46 +686,137 @@ function KpiSelector({ selected, onApply, onCancel, isDark }: {
   const sAccent        = isDark ? '#818cf8' : '#3730a3';
   const sAccentActive  = isDark ? '#a5b4fc' : '#3730a3';
   const sCheckBg       = isDark ? '#6366f1' : '#4338ca';
+  const sInputBg       = isDark ? 'rgba(255,255,255,0.03)' : 'rgba(45,42,38,0.04)';
+
+  const renderTile = (name: string, label: string, isCustom: boolean) => {
+    const active = local.includes(name);
+    return (
+      <button
+        key={name}
+        onClick={() => toggle(name)}
+        className="flex items-center gap-2 px-3 py-2 rounded-lg text-left text-xs font-medium border transition-colors cursor-pointer"
+        style={{
+          background: active
+            ? isDark ? 'rgba(99,102,241,0.18)' : 'rgba(99,102,241,0.10)'
+            : sItemBg,
+          borderColor: active
+            ? isDark ? 'rgba(99,102,241,0.45)' : 'rgba(99,102,241,0.35)'
+            : sItemBorder,
+          color: active ? sAccentActive : sTextSecondary,
+        }}
+        title={name}
+      >
+        <span
+          className="w-3.5 h-3.5 rounded flex items-center justify-center flex-shrink-0 border transition-colors"
+          style={{
+            background: active ? sCheckBg : 'transparent',
+            borderColor: active ? sCheckBg : sMuted,
+          }}
+        >
+          {active && <Check className="w-2.5 h-2.5 text-white" />}
+        </span>
+        <span className="truncate flex-1">{label}</span>
+        {isCustom && (
+          <Database className="w-2.5 h-2.5 flex-shrink-0 opacity-50" />
+        )}
+      </button>
+    );
+  };
 
   return (
     <div className="absolute inset-0 z-30 rounded-2xl flex flex-col overflow-hidden"
       style={{ background: sBg, backdropFilter: 'blur(8px)' }}>
       <div className="flex items-center justify-between px-4 py-3 border-b" style={{ borderColor: sBorder }}>
-        <span className="text-[13px] font-semibold" style={{ color: sTextPrimary }}>Select KPIs to plot</span>
+        <div className="flex flex-col">
+          <span className="text-[13px] font-semibold" style={{ color: sTextPrimary }}>
+            Select KPIs to plot
+          </span>
+          <span className="text-[10.5px] mt-0.5" style={{ color: sMuted }}>
+            {catalogLoading
+              ? 'Loading catalog…'
+              : `${ALL_STANDARD_KPIS.length} standard · ${customCatalog.length} more from the database`}
+          </span>
+        </div>
         <button onClick={onCancel} className="hover:opacity-70 transition-opacity" style={{ color: sMuted }}>
           <X className="w-4 h-4" />
         </button>
       </div>
+
+      {/* Search bar */}
+      <div className="px-4 pt-3" >
+        <div
+          className="flex items-center gap-2 rounded-lg border px-2.5 py-1.5"
+          style={{ borderColor: sBorder, background: sInputBg }}
+        >
+          <Search className="w-3.5 h-3.5 flex-shrink-0" style={{ color: sMuted }} />
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search standard or DB KPIs (e.g. DL_DRB_TPUT, drop, accessibility)…"
+            className="flex-1 bg-transparent text-[12px] outline-none"
+            style={{ color: sTextPrimary }}
+          />
+          {query ? (
+            <button onClick={() => setQuery('')} className="opacity-70 hover:opacity-100" style={{ color: sMuted }} title="Clear">
+              <X className="w-3 h-3" />
+            </button>
+          ) : null}
+        </div>
+      </div>
+
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
-        {STANDARD_KPI_GROUPS.map((g) => (
-          <div key={g.group}>
-            <div className="text-[10px] font-bold uppercase tracking-[0.12em] mb-2"
-              style={{ color: sTextSecondary }}>{g.group}</div>
-            <div className="grid grid-cols-2 gap-1.5">
-              {g.kpis.map((k) => {
-                const active = local.includes(k.name);
-                return (
-                  <button key={k.name} onClick={() => toggle(k.name)}
-                    className="flex items-center gap-2 px-3 py-2 rounded-lg text-left text-xs font-medium border transition-colors cursor-pointer"
-                    style={{
-                      background: active ? (isDark ? 'rgba(99,102,241,0.18)' : 'rgba(99,102,241,0.10)') : sItemBg,
-                      borderColor: active ? (isDark ? 'rgba(99,102,241,0.45)' : 'rgba(99,102,241,0.35)') : sItemBorder,
-                      color: active ? sAccentActive : sTextSecondary,
-                    }}>
-                    <span className="w-3.5 h-3.5 rounded flex items-center justify-center flex-shrink-0 border transition-colors"
-                      style={{
-                        background: active ? sCheckBg : 'transparent',
-                        borderColor: active ? sCheckBg : sMuted,
-                      }}>
-                      {active && <Check className="w-2.5 h-2.5 text-white" />}
-                    </span>
-                    <span className="truncate">{k.label}</span>
-                  </button>
-                );
-              })}
+        {trimmedQuery ? (
+          <div>
+            <div className="text-[10px] font-bold uppercase tracking-[0.12em] mb-2 flex items-center gap-1.5"
+              style={{ color: sTextSecondary }}
+            >
+              <span>Results</span>
+              <span style={{ color: sMuted }}>· {searchResults.length}</span>
             </div>
+            {searchResults.length === 0 ? (
+              <p className="text-[12px]" style={{ color: sMuted }}>
+                No KPIs match &ldquo;{query}&rdquo;.
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 gap-1.5">
+                {searchResults.map((r) => renderTile(r.name, r.label, r.group === 'custom'))}
+              </div>
+            )}
           </div>
-        ))}
+        ) : (
+          <>
+            {STANDARD_KPI_GROUPS.map((g) => (
+              <div key={g.group}>
+                <div className="text-[10px] font-bold uppercase tracking-[0.12em] mb-2"
+                  style={{ color: sTextSecondary }}>{g.group}</div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {g.kpis.map((k) => renderTile(k.name, k.label, false))}
+                </div>
+              </div>
+            ))}
+            {customCatalog.length > 0 && (
+              <div>
+                <div className="text-[10px] font-bold uppercase tracking-[0.12em] mb-2 flex items-center gap-1.5"
+                  style={{ color: sTextSecondary }}
+                >
+                  <Database className="w-3 h-3" />
+                  <span>From the database</span>
+                  <span style={{ color: sMuted }}>· {customCatalog.length}</span>
+                </div>
+                <p className="text-[10.5px] mb-2" style={{ color: sMuted }}>
+                  Type in the search box above to find any of the live KPI names from the DB.
+                </p>
+                {/* Always-selected custom KPIs surface here so users can untick them. */}
+                <div className="grid grid-cols-2 gap-1.5">
+                  {customCatalog
+                    .filter((n) => local.includes(n))
+                    .map((n) => renderTile(n, n.replace(/_/g, ' '), true))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
       <div className="flex gap-2 px-4 py-3 border-t" style={{ borderColor: sBorder }}>
         <button onClick={onCancel}
@@ -926,6 +1082,36 @@ export default function ChatKpiDashboard({
           </button>
         </div>
       </div>
+
+      {/* ── USID quick-switch strip (only when multiple sites loaded) ── */}
+      {allSiteIds.length > 1 && (
+        <div
+          className="flex items-center gap-2 px-4 py-2 border-b overflow-x-auto scrollbar-thin"
+          style={{ borderColor, background: isDark ? 'rgba(255,255,255,0.015)' : 'rgba(45,42,38,0.015)' }}
+        >
+          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] shrink-0" style={{ color: muted }}>
+            Sites
+          </span>
+          {allSiteIds.map((id) => {
+            const isActive = id === activeSiteId;
+            return (
+              <button
+                key={id}
+                onClick={() => { setActiveSiteId(id); setUsidInput(id); }}
+                className="shrink-0 rounded-full border px-2.5 py-0.5 text-[11px] font-semibold transition-colors"
+                style={{
+                  background: isActive ? accentBg : 'transparent',
+                  borderColor: isActive ? accentBorder : borderMed,
+                  color: isActive ? accentActive : textSecondary,
+                }}
+                title={`Switch to USID ${id}`}
+              >
+                {id}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* ── Body ─────────────────────────────────────────────────── */}
       {error ? (

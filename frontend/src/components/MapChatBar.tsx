@@ -188,13 +188,23 @@ async function executeUiActions(args: {
   thinkingId: string;
   assistantText: string;
   // Generative UI context setters
-  dispatchTabRequest?: (req: { topTab?: string; kpiTab?: string; rcaSubTab?: string; viewMode?: string }) => void;
+  dispatchTabRequest?: (req: {
+    topTab?: 'site-kpi' | 'rca' | 'operational' | 'topology';
+    kpiTab?: 'cqx' | 'daily' | 'hourly' | 'overlay' | 'traffic-profile' | 'mobility' | 'outages';
+    rcaSubTab?: 'evidences' | 'summary' | 'raw-data';
+    viewMode?: 'summary' | 'diagnostic';
+  }) => void;
   setDateFilter?: (dateId: string) => void;
-  setMapLayer?: (layer: 'degraded' | 'outage' | 'overutilized') => void;
+  setMapLayer?: (layer: 'degraded' | 'outage' | 'overutilized' | null) => void;
   onNavigate?: (view: string) => void;
+  setEventsLayer?: (enabled: boolean) => void;
+  currentEventsEnabled?: boolean;
+  setExternalMap?: (enabled: boolean, provider?: 'maplibre' | 'esri') => void;
+  currentExternalEnabled?: boolean;
 }): Promise<void> {
   const { actions, selectedSite, selectedDateId, queryDateId, sites, openSite, pushMsg, replaceMsg, thinkingId, assistantText,
-    dispatchTabRequest, setDateFilter, setMapLayer, onNavigate } = args;
+    dispatchTabRequest, setDateFilter, setMapLayer, onNavigate,
+    setEventsLayer, currentEventsEnabled, setExternalMap, currentExternalEnabled } = args;
   // queryDateId (extracted from the user's message text) takes priority over the map's selected date.
   const dateId = queryDateId ?? selectedDateId ?? new Date().toISOString().slice(0, 10);
 
@@ -322,6 +332,23 @@ async function executeUiActions(args: {
       continue;
     }
 
+    if (action.type === 'CLEAR_MAP_LAYER') {
+      setMapLayer?.(null);
+      continue;
+    }
+
+    if (action.type === 'TOGGLE_EVENTS_LAYER') {
+      const next = action.enabled !== undefined ? action.enabled : !currentEventsEnabled;
+      setEventsLayer?.(next);
+      continue;
+    }
+
+    if (action.type === 'TOGGLE_EXTERNAL_MAP') {
+      const next = action.enabled !== undefined ? action.enabled : !currentExternalEnabled;
+      setExternalMap?.(next, (action as any).provider);
+      continue;
+    }
+
     if (action.type === 'NAVIGATE_VIEW') {
       onNavigate?.(action.view);
       continue;
@@ -367,15 +394,16 @@ function StatusPill({ status }: { status: MapSite['status'] }) {
 function CardButton({
   label, onClick, color = 'cyan',
 }: { label: string; onClick: () => void; color?: 'cyan' | 'teal' | 'indigo' | 'violet' }) {
-  // 'indigo' / 'violet' kept as legacy aliases for callers that still pass them
   const isTeal = color === 'teal' || color === 'violet';
-  const cls = isTeal
-    ? 'text-teal-300 border-teal-500/40 hover:bg-teal-500/15'
-    : 'text-cyan-300 border-cyan-500/40 hover:bg-cyan-500/15';
+  // High-contrast CTA: solid enough to read in both dark variants
+  const style = isTeal
+    ? { background: 'rgba(20,184,166,0.22)', border: '1px solid rgba(20,184,166,0.45)', color: '#99f6e4' }
+    : { background: 'rgba(6,182,212,0.20)', border: '1px solid rgba(6,182,212,0.45)', color: '#a5f3fc' };
   return (
     <button
       onClick={onClick}
-      className={`w-full rounded-lg py-1.5 text-[11px] font-semibold border transition-colors ${cls}`}
+      className="w-full rounded-lg py-1.5 text-[11px] font-bold tracking-wide transition-all hover:brightness-125"
+      style={style}
     >
       {label} →
     </button>
@@ -387,28 +415,30 @@ function CardButton({
 function NavCard({ site, onOpen }: { site: MapSite; onOpen: () => void }) {
   const { dId } = useDummifier();
   return (
-    <div className="mt-2 rounded-xl border border-cyan-500/25 bg-slate-900/70 overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-cyan-500/15 bg-cyan-500/8">
-        <MapPin className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-        <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-cyan-300">Navigated to site</span>
+    <div className="mt-2 rounded-xl overflow-hidden" style={{ background: 'rgba(12,20,44,0.97)', border: '1px solid rgba(6,182,212,0.35)' }}>
+      {/* Header stripe — visible cyan accent */}
+      <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid rgba(6,182,212,0.25)', background: 'rgba(6,182,212,0.18)' }}>
+        <MapPin className="w-3.5 h-3.5 text-cyan-300 shrink-0" />
+        <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-cyan-200">Navigated to site</span>
       </div>
       <div className="px-3 py-2.5 space-y-1.5">
         <div className="flex items-center justify-between">
           <span className="text-[13px] font-semibold text-white">{site.siteName || dId(site.siteId)}</span>
           <StatusPill status={site.status} />
         </div>
-        <p className="text-[11px] text-text-muted">
-          Site: {dId(site.realSiteId || site.siteId)} &nbsp;·&nbsp; {site.cellCount} cells
+        <p className="text-[11px] text-slate-300">
+          Site: <span className="text-white font-medium">{dId(site.realSiteId || site.siteId)}</span>
+          &nbsp;·&nbsp; {site.cellCount} cells
         </p>
         {site.anomalyCount > 0 && (
-          <p className="flex items-center gap-1.5 text-[11px] text-amber-400">
+          <p className="flex items-center gap-1.5 text-[11px] text-amber-300 font-medium">
             <AlertCircle className="w-3 h-3 shrink-0" />
             {site.anomalyCount} anomal{site.anomalyCount > 1 ? 'ies' : 'y'} detected
           </p>
         )}
       </div>
       <div className="px-3 pb-3">
-        <CardButton label="Open Analysis" onClick={onOpen} color="indigo" />
+        <CardButton label="Open Analysis" onClick={onOpen} color="cyan" />
       </div>
     </div>
   );
@@ -417,10 +447,11 @@ function NavCard({ site, onOpen }: { site: MapSite; onOpen: () => void }) {
 function StatsCard({ site, onOpen }: { site: MapSite; onOpen: () => void }) {
   const { dId } = useDummifier();
   return (
-    <div className="mt-2 rounded-xl border border-blue-500/25 bg-slate-900/70 overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-blue-500/15 bg-blue-500/8">
-        <BarChart2 className="w-3.5 h-3.5 text-blue-400 shrink-0" />
-        <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-300">Site Overview</span>
+    <div className="mt-2 rounded-xl overflow-hidden" style={{ background: 'rgba(12,20,44,0.97)', border: '1px solid rgba(59,130,246,0.38)' }}>
+      {/* Header stripe — solid blue accent */}
+      <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid rgba(59,130,246,0.25)', background: 'rgba(59,130,246,0.20)' }}>
+        <BarChart2 className="w-3.5 h-3.5 text-blue-300 shrink-0" />
+        <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-blue-200">Site Overview</span>
       </div>
       <div className="px-3 py-2.5 space-y-2">
         <div className="flex items-center justify-between">
@@ -434,15 +465,15 @@ function StatsCard({ site, onOpen }: { site: MapSite; onOpen: () => void }) {
             { label: 'Anomalies', value: String(site.anomalyCount) },
             { label: 'Tickets', value: site.hasActiveTickets ? 'Active' : 'None' },
           ].map(({ label, value }) => (
-            <div key={label} className="rounded-lg bg-white/5 px-2.5 py-1.5">
-              <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-text-muted mb-0.5">{label}</p>
-              <p className="text-[12px] font-semibold text-text-primary">{value}</p>
+            <div key={label} className="rounded-lg px-2.5 py-1.5" style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.10)' }}>
+              <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-slate-400 mb-0.5">{label}</p>
+              <p className="text-[12px] font-semibold text-white">{value}</p>
             </div>
           ))}
         </div>
       </div>
       <div className="px-3 pb-3">
-        <CardButton label="Open Full Analysis" onClick={onOpen} color="indigo" />
+        <CardButton label="Open Full Analysis" onClick={onOpen} color="cyan" />
       </div>
     </div>
   );
@@ -454,52 +485,71 @@ function RcaCard({
   const { dId, dText } = useDummifier();
   const { rca } = analysis;
   const score = rca.confidenceScoreInt ?? (rca.confidenceScore != null ? Math.round(rca.confidenceScore * 100) : null);
-  const shortEntries = Object.entries(rca.shortSummary ?? {}).slice(0, 3);
+
+  // Filter shortSummary: skip raw objects, keep only string-renderable values
+  const shortEntries = Object.entries(rca.shortSummary ?? {})
+    .filter(([, v]) => {
+      if (v == null) return false;
+      if (typeof v === 'object') return false; // skip [object Object] blobs
+      const s = String(v).trim();
+      return s.length > 0;
+    })
+    .slice(0, 3);
 
   return (
-    <div className="mt-2 rounded-xl border border-teal-500/25 bg-slate-900/70 overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-teal-500/15 bg-teal-500/8">
-        <Brain className="w-3.5 h-3.5 text-teal-400 shrink-0" />
-        <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-teal-300">Root Cause Analysis</span>
+    <div className="mt-2 rounded-xl overflow-hidden" style={{ background: 'rgba(12,20,44,0.97)', border: '1px solid rgba(20,184,166,0.38)' }}>
+      {/* Header stripe — visible teal accent */}
+      <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid rgba(20,184,166,0.25)', background: 'rgba(20,184,166,0.18)' }}>
+        <Brain className="w-3.5 h-3.5 text-teal-300 shrink-0" />
+        <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-teal-200">Root Cause Analysis</span>
         {score != null && score > 0 && (
-          <span className="ml-auto text-[10px] font-bold text-teal-300 bg-teal-500/20 rounded-full px-2 py-0.5">
+          <span className="ml-auto text-[10px] font-bold rounded-full px-2 py-0.5" style={{ background: 'rgba(20,184,166,0.35)', color: '#ccfbf1', border: '1px solid rgba(20,184,166,0.50)' }}>
             {score}% confidence
           </span>
         )}
       </div>
+
       <div className="px-3 py-2.5 space-y-2">
+        {/* Site name + status */}
         <div className="flex items-center justify-between">
           <span className="text-[13px] font-semibold text-white">{site.siteName || dId(site.siteId)}</span>
           <StatusPill status={site.status} />
         </div>
-        <p className="text-[11px] text-text-muted">
-          Date: <span className="text-text-muted font-medium">{dateId}</span>
+        <p className="text-[11px] text-slate-400">
+          Date: <span className="text-slate-200 font-medium">{dateId}</span>
         </p>
+
+        {/* Bucket pill */}
         {rca.bucket && (
-          <div className="rounded-lg bg-teal-950/50 border border-teal-500/15 px-2.5 py-1.5">
-            <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-teal-400 mb-0.5">Bucket</p>
-            <p className="text-[12px] font-semibold text-text-primary">{rca.bucket.replace(/_/g, ' ')}</p>
+          <div className="rounded-lg px-2.5 py-1.5" style={{ background: 'rgba(20,184,166,0.15)', border: '1px solid rgba(20,184,166,0.35)' }}>
+            <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-teal-300 mb-0.5">Bucket</p>
+            <p className="text-[12px] font-semibold text-white">{rca.bucket.replace(/_/g, ' ')}</p>
           </div>
         )}
+
+        {/* Short summary rows — only string values, no [object Object] */}
         {shortEntries.length > 0 && (
           <div className="space-y-1">
             {shortEntries.map(([k, v]) => (
-              <p key={k} className="text-[11px] text-text-muted leading-snug">
-                <span className="text-text-muted">{k}: </span>
+              <p key={k} className="text-[11px] text-slate-200 leading-snug">
+                <span className="text-slate-400 font-medium">{k}: </span>
                 {dText(String(v))}
               </p>
             ))}
           </div>
         )}
+
+        {/* Recommendation box */}
         {rca.solutionSummary && (
-          <div className="rounded-lg bg-emerald-950/40 border border-emerald-500/20 px-2.5 py-2">
-            <p className="text-[9px] font-bold uppercase tracking-[0.1em] text-emerald-400 mb-0.5">Recommendation</p>
-            <p className="text-[11px] text-text-muted leading-relaxed line-clamp-3">{dText(String(rca.solutionSummary))}</p>
+          <div className="rounded-lg px-2.5 py-2" style={{ background: 'rgba(16,185,129,0.12)', border: '1px solid rgba(16,185,129,0.32)' }}>
+            <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-emerald-300 mb-0.5">Recommendation</p>
+            <p className="text-[11px] text-slate-100 leading-relaxed line-clamp-3">{dText(String(rca.solutionSummary))}</p>
           </div>
         )}
       </div>
+
       <div className="px-3 pb-3">
-        <CardButton label="Open Full RCA" onClick={onOpen} color="violet" />
+        <CardButton label="Open Full RCA" onClick={onOpen} color="teal" />
       </div>
     </div>
   );
@@ -508,17 +558,15 @@ function RcaCard({
 function NoRcaCard({ site, dateId }: { site: MapSite; dateId: string }) {
   const { dId } = useDummifier();
   return (
-    <div className="mt-2 rounded-xl border border-emerald-500/20 bg-slate-900/70 overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-emerald-500/15 bg-emerald-500/8">
-        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-        <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-300">No Degradation Detected</span>
+    <div className="mt-2 rounded-xl overflow-hidden" style={{ background: 'rgba(12,20,44,0.97)', border: '1px solid rgba(16,185,129,0.38)' }}>
+      <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: '1px solid rgba(16,185,129,0.25)', background: 'rgba(16,185,129,0.18)' }}>
+        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+        <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-emerald-200">No Degradation Detected</span>
       </div>
       <div className="px-3 py-3 space-y-1">
         <p className="text-[13px] font-semibold text-white">{site.siteName || dId(site.siteId)}</p>
-        <p className="text-[12px] text-emerald-300">Site is operating normally on {dateId}.</p>
-        <p className="text-[11px] text-text-muted mt-1">
-          RCA is unavailable — no anomalies were detected.
-        </p>
+        <p className="text-[12px] font-medium text-emerald-300">Site operating normally on {dateId}.</p>
+        <p className="text-[11px] text-slate-400 mt-1">No anomalies detected — RCA not applicable.</p>
       </div>
     </div>
   );
@@ -533,10 +581,10 @@ const GENERAL_SUGGESTIONS = [
   { icon: Sparkles,  text: 'Create a degradation summary dashboard' },
 ];
 const NO_SITE_SUGGESTIONS = [
-  { icon: MapPin,    text: 'Show top offender sites on the network' },
-  { icon: BarChart2, text: 'Create a network KPI dashboard' },
+  { icon: MapPin,    text: 'Show degraded sites' },
+  { icon: BarChart2, text: 'Show outage sites' },
   { icon: Brain,     text: 'What are the active anomalies today?' },
-  { icon: Sparkles,  text: 'Show capacity-at-risk breakdown' },
+  { icon: Sparkles,  text: 'Toggle events layer' },
 ];
 const INSIGHTS_SUGGESTIONS = [
   { icon: Database,  text: 'Top 10 sites by PRB utilization' },
@@ -577,7 +625,16 @@ export default function MapChatBar({
   onSwitchInsightsTab,
 }: MapChatBarProps) {
   const { sessionId } = useChat();
-  const { setSelectedDateId, setActiveSiteLayer, dispatchTabRequest } = useMapData();
+  const {
+    setSelectedDateId,
+    setActiveSiteLayer,
+    dispatchTabRequest,
+    eventsLayerEnabled,
+    setEventsLayerEnabled,
+    externalMapLayerEnabled,
+    setExternalMapLayerEnabled,
+    setExternalMapProvider,
+  } = useMapData();
   const { dId, dText, unmapText } = useDummifier();
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState<ChatMsg[]>([]);
@@ -592,7 +649,7 @@ export default function MapChatBar({
     if (!isOpen || !scrollRef.current) return;
     // Delay to allow large visualizations (maps, charts) to paint before measuring scrollHeight
     const lastMsg = messages[messages.length - 1];
-    const delayMs = lastMsg?.visualization ? 800 : 120;
+    const delayMs = (lastMsg as any)?.visualization ? 800 : 120;
     const t = setTimeout(() => {
       if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }, delayMs);
@@ -654,6 +711,13 @@ export default function MapChatBar({
           dispatchTabRequest,
           setDateFilter: setSelectedDateId,
           setMapLayer: setActiveSiteLayer,
+          setEventsLayer: setEventsLayerEnabled,
+          currentEventsEnabled: eventsLayerEnabled,
+          setExternalMap: (enabled, provider) => {
+            setExternalMapLayerEnabled(enabled);
+            if (provider) setExternalMapProvider(provider);
+          },
+          currentExternalEnabled: externalMapLayerEnabled,
         });
         return;
       }
@@ -694,6 +758,13 @@ export default function MapChatBar({
           dispatchTabRequest,
           setDateFilter: setSelectedDateId,
           setMapLayer: setActiveSiteLayer,
+          setEventsLayer: setEventsLayerEnabled,
+          currentEventsEnabled: eventsLayerEnabled,
+          setExternalMap: (enabled, provider) => {
+            setExternalMapLayerEnabled(enabled);
+            if (provider) setExternalMapProvider(provider);
+          },
+          currentExternalEnabled: externalMapLayerEnabled,
         });
         return;
       }
@@ -773,7 +844,7 @@ export default function MapChatBar({
     } finally {
       setLoading(false);
     }
-  }, [loading, pendingConfirmation, sites, selectedSite, selectedDateId, sessionId, openSite, pushMsg, replaceMsg, currentSubView, currentInsightsTab, onSwitchInsightsTab, unmapText]);
+  }, [loading, pendingConfirmation, sites, selectedSite, selectedDateId, sessionId, openSite, pushMsg, replaceMsg, currentSubView, currentInsightsTab, onSwitchInsightsTab, unmapText, eventsLayerEnabled, externalMapLayerEnabled, setEventsLayerEnabled, setExternalMapLayerEnabled, setExternalMapProvider]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); }
@@ -798,39 +869,39 @@ export default function MapChatBar({
       {/* ── Chat panel ───────────────────────────────────────────────────── */}
       {isOpen && (
         <div
-          className="w-full mb-2.5 rounded-[22px] overflow-hidden"
+          className="w-full mb-2.5 rounded-[20px] overflow-hidden"
           style={{
-            background: 'linear-gradient(155deg, rgba(15,23,42,0.56) 0%, rgba(2,6,23,0.72) 100%)',
-            border: '1px solid rgba(226,232,240,0.18)',
-            boxShadow: '0 30px 90px rgba(2,6,23,0.42), 0 0 0 0.5px rgba(255,255,255,0.10) inset, 0 1px 0 rgba(255,255,255,0.12) inset',
-            backdropFilter: 'blur(46px) saturate(150%)',
-            WebkitBackdropFilter: 'blur(46px) saturate(150%)',
+            // High-opacity dark navy — clearly distinct from the map behind it
+            background: 'linear-gradient(160deg, #0c1428 0%, #080f20 100%)',
+            border: '1px solid rgba(255,255,255,0.16)',
+            boxShadow: '0 32px 80px rgba(0,0,0,0.70), 0 0 0 0.5px rgba(255,255,255,0.06) inset',
+            backdropFilter: 'blur(24px)',
+            WebkitBackdropFilter: 'blur(24px)',
           }}
         >
-          {/* Header */}
+          {/* Header — clearly readable against the panel */}
           <div
-            className="flex items-center justify-between px-4 py-3"
+            className="flex items-center justify-between px-4 py-2.5"
             style={{
-              borderBottom: '1px solid rgba(255,255,255,0.07)',
-              background: 'linear-gradient(90deg, rgba(148,163,184,0.12) 0%, rgba(148,163,184,0.04) 52%, transparent 82%)',
+              borderBottom: '1px solid rgba(255,255,255,0.10)',
+              background: 'rgba(255,255,255,0.05)',
             }}
           >
             <div className="flex items-center gap-2.5">
               <div
-                className="flex items-center justify-center w-6 h-6 rounded-full"
+                className="flex items-center justify-center w-6 h-6 rounded-full shrink-0"
                 style={{
-                  background: 'linear-gradient(135deg, rgba(226,232,240,0.28), rgba(148,163,184,0.16))',
-                  boxShadow: '0 0 10px rgba(15,23,42,0.22)',
-                  border: '1px solid rgba(203,213,225,0.34)',
+                  background: 'linear-gradient(135deg, rgba(99,102,241,0.50), rgba(67,56,202,0.40))',
+                  border: '1px solid rgba(129,140,248,0.50)',
                 }}
               >
-                <Sparkles className="w-3 h-3 text-text-primary" />
+                <Sparkles className="w-3 h-3 text-indigo-200" />
               </div>
-              <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-white/85">
-                Aira
+              <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-white">
+                AIRA
               </span>
-              <span className="text-[10px] text-white/18">|</span>
-              <span className="text-[11px] text-white/38 font-medium truncate max-w-[180px]">
+              <span className="text-[10px] text-white/30">|</span>
+              <span className="text-[11px] text-slate-300 font-medium truncate max-w-[180px]">
                 {currentSubView === 'insights'
                   ? `Insights · ${currentInsightsTab ?? 'market'}`
                   : selectedSite ? dId(selectedSite.siteId) : 'Network Intelligence'}
@@ -839,9 +910,9 @@ export default function MapChatBar({
             <button
               onClick={() => setIsOpen(false)}
               className="p-1.5 rounded-lg transition-all"
-              style={{ color: 'rgba(255,255,255,0.35)' }}
-              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; e.currentTarget.style.color = 'rgba(255,255,255,0.7)'; }}
-              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.35)'; }}
+              style={{ color: 'rgba(255,255,255,0.55)' }}
+              onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.10)'; e.currentTarget.style.color = 'rgba(255,255,255,0.90)'; }}
+              onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'rgba(255,255,255,0.55)'; }}
             >
               <ChevronDown className="w-3.5 h-3.5" />
             </button>
@@ -856,31 +927,31 @@ export default function MapChatBar({
             {/* Suggestions */}
             {showSuggestions && (
               <div className="space-y-1.5 pb-1">
-                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] px-1 mb-2" style={{ color: 'rgba(255,255,255,0.25)' }}>
+                <p className="text-[10px] font-semibold uppercase tracking-[0.16em] px-1 mb-2 text-slate-400">
                   Try asking…
                 </p>
                 {suggestions.map(({ icon: Icon, text }) => (
                   <button
                     key={text}
                     onClick={() => send(text)}
-                    className="w-full flex items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[12px] transition-all"
+                    className="w-full flex items-center gap-2.5 rounded-xl px-3 py-2 text-left text-[12px] transition-all cursor-pointer"
                     style={{
-                      background: 'rgba(255,255,255,0.05)',
-                      border: '1px solid rgba(255,255,255,0.10)',
-                      color: 'rgba(255,255,255,0.55)',
+                      background: 'rgba(255,255,255,0.07)',
+                      border: '1px solid rgba(255,255,255,0.14)',
+                      color: 'rgba(255,255,255,0.82)',
                     }}
                     onMouseEnter={e => {
-                      e.currentTarget.style.background = 'rgba(148,163,184,0.16)';
-                      e.currentTarget.style.borderColor = 'rgba(148,163,184,0.30)';
-                      e.currentTarget.style.color = 'rgba(255,255,255,0.85)';
+                      e.currentTarget.style.background = 'rgba(99,102,241,0.18)';
+                      e.currentTarget.style.borderColor = 'rgba(129,140,248,0.40)';
+                      e.currentTarget.style.color = 'rgba(255,255,255,0.97)';
                     }}
                     onMouseLeave={e => {
-                      e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
-                      e.currentTarget.style.borderColor = 'rgba(255,255,255,0.10)';
-                      e.currentTarget.style.color = 'rgba(255,255,255,0.55)';
+                      e.currentTarget.style.background = 'rgba(255,255,255,0.07)';
+                      e.currentTarget.style.borderColor = 'rgba(255,255,255,0.14)';
+                      e.currentTarget.style.color = 'rgba(255,255,255,0.82)';
                     }}
                   >
-                    <Icon className="w-3.5 h-3.5 text-text-muted shrink-0" />
+                    <Icon className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
                     {text}
                   </button>
                 ))}
@@ -897,22 +968,23 @@ export default function MapChatBar({
                   <div
                     className="shrink-0 mt-0.5 w-5 h-5 rounded-full flex items-center justify-center"
                     style={{
-                      background: 'linear-gradient(135deg, rgba(226,232,240,0.24), rgba(148,163,184,0.14))',
-                      border: '1px solid rgba(203,213,225,0.26)',
+                      background: 'linear-gradient(135deg, rgba(99,102,241,0.50), rgba(67,56,202,0.40))',
+                      border: '1px solid rgba(129,140,248,0.45)',
                     }}
                   >
-                    <Sparkles className="w-2.5 h-2.5 text-text-primary" />
+                    <Sparkles className="w-2.5 h-2.5 text-indigo-200" />
                   </div>
                 )}
 
                 <div className="max-w-[88%] min-w-0">
                   {msg.role === 'user' && msg.type === 'text' && (
+                    /* Indigo bubble — clearly distinct from the dark panel */
                     <div
-                      className="rounded-2xl rounded-tr-sm px-3.5 py-2 text-[13px] leading-relaxed text-white"
+                      className="rounded-2xl rounded-tr-sm px-3.5 py-2 text-[13px] leading-relaxed text-white font-medium"
                       style={{
-                        background: 'linear-gradient(135deg, rgba(71,85,105,0.44), rgba(30,41,59,0.40))',
-                        border: '1px solid rgba(148,163,184,0.36)',
-                        boxShadow: '0 4px 16px rgba(15,23,42,0.24)',
+                        background: 'linear-gradient(135deg, rgba(79,70,229,0.58), rgba(67,56,202,0.52))',
+                        border: '1px solid rgba(129,140,248,0.50)',
+                        boxShadow: '0 4px 14px rgba(79,70,229,0.28)',
                       }}
                     >
                       {dText(msg.text)}
@@ -927,8 +999,7 @@ export default function MapChatBar({
                         <>
                           {msg.text && (
                             <p
-                              className="text-[13px] leading-relaxed"
-                              style={{ color: 'rgba(255,255,255,0.80)' }}
+                              className="text-[13px] leading-relaxed text-slate-100"
                               dangerouslySetInnerHTML={{
                                 __html: dText(msg.text)
                                   .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -967,23 +1038,23 @@ export default function MapChatBar({
               <div className="flex items-center justify-end gap-2 pt-1">
                 <button
                   onClick={() => send('no')}
-                  className="rounded-full px-3 py-1 text-[11px] font-semibold transition-colors"
+                  className="rounded-full px-3.5 py-1 text-[11px] font-semibold transition-all hover:brightness-125"
                   style={{
-                    background: 'rgba(255,255,255,0.06)',
-                    border: '1px solid rgba(255,255,255,0.10)',
-                    color: 'rgba(255,255,255,0.72)',
+                    background: 'rgba(255,255,255,0.10)',
+                    border: '1px solid rgba(255,255,255,0.22)',
+                    color: 'rgba(255,255,255,0.85)',
                   }}
                 >
                   No
                 </button>
                 <button
                   onClick={() => send('yes')}
-                  className="rounded-full px-3 py-1 text-[11px] font-semibold transition-colors"
+                  className="rounded-full px-3.5 py-1 text-[11px] font-semibold transition-all hover:brightness-125"
                   style={{
-                    background: 'linear-gradient(135deg, rgba(51,65,85,0.88), rgba(30,41,59,0.72))',
-                    border: '1px solid rgba(148,163,184,0.40)',
+                    background: 'linear-gradient(135deg, rgba(99,102,241,0.65), rgba(67,56,202,0.55))',
+                    border: '1px solid rgba(129,140,248,0.50)',
                     color: 'white',
-                    boxShadow: '0 6px 16px rgba(15,23,42,0.30)',
+                    boxShadow: '0 4px 14px rgba(79,70,229,0.30)',
                   }}
                 >
                   Yes
@@ -994,51 +1065,45 @@ export default function MapChatBar({
         </div>
       )}
 
-      {/* ── Input bar ────────────────────────────────────────────────────── */}
+      {/* ── Input bar — solid dark navy so it stands out from the map ── */}
       <div
         className="w-full flex items-center gap-2.5 rounded-full px-3.5 py-2"
         style={{
-          background: 'linear-gradient(140deg, rgba(15,23,42,0.54) 0%, rgba(2,6,23,0.70) 100%)',
-          border: '1px solid rgba(226,232,240,0.22)',
-          boxShadow: [
-            '0 20px 60px rgba(2,6,23,0.38)',
-            '0 2px 8px rgba(2,6,23,0.24)',
-            'inset 0 1px 0 rgba(255,255,255,0.16)',
-            'inset 0 -1px 0 rgba(2,6,23,0.26)',
-          ].join(', '),
-          backdropFilter: 'blur(44px) saturate(145%)',
-          WebkitBackdropFilter: 'blur(44px) saturate(145%)',
+          background: 'linear-gradient(140deg, #0e1830 0%, #080f20 100%)',
+          border: '1px solid rgba(255,255,255,0.20)',
+          boxShadow: '0 20px 56px rgba(0,0,0,0.60), inset 0 1px 0 rgba(255,255,255,0.10)',
+          backdropFilter: 'blur(24px)',
+          WebkitBackdropFilter: 'blur(24px)',
         }}
       >
         {/* Aira icon */}
         <div
           className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center cursor-pointer transition-all"
           style={{
-            background: 'linear-gradient(135deg, rgba(226,232,240,0.24), rgba(148,163,184,0.14))',
-            border: '1px solid rgba(203,213,225,0.34)',
-            boxShadow: '0 0 12px rgba(15,23,42,0.20)',
+            background: 'linear-gradient(135deg, rgba(99,102,241,0.55), rgba(67,56,202,0.45))',
+            border: '1px solid rgba(129,140,248,0.50)',
           }}
           onClick={() => messages.length > 0 && setIsOpen(v => !v)}
           title="Aira"
-          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 0 16px rgba(148,163,184,0.38)'; }}
-          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 0 12px rgba(15,23,42,0.20)'; }}
+          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.boxShadow = '0 0 14px rgba(99,102,241,0.50)'; }}
+          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.boxShadow = 'none'; }}
         >
           {loading ? (
-            <Loader2 className="w-3.5 h-3.5 animate-spin text-text-primary" />
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-200" />
           ) : (
             <img src="/aira-logo.png" alt="Aira" className="w-4 h-4 object-contain" />
           )}
         </div>
 
-        {/* Site badge */}
+        {/* Site badge — clearly readable */}
         {selectedSite && (
           <span
-            className="shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-semibold truncate max-w-[110px]"
+            className="shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-bold truncate max-w-[110px]"
             style={{
-              background: 'rgba(255,255,255,0.09)',
-              border: '1px solid rgba(255,255,255,0.13)',
-              color: 'rgba(255,255,255,0.65)',
-              letterSpacing: '0.02em',
+              background: 'rgba(99,102,241,0.25)',
+              border: '1px solid rgba(129,140,248,0.40)',
+              color: '#c7d2fe',
+              letterSpacing: '0.03em',
             }}
           >
             {dId(selectedSite.siteId)}
@@ -1054,8 +1119,8 @@ export default function MapChatBar({
           onKeyDown={handleKeyDown}
           onFocus={() => { if (messages.length > 0) setIsOpen(true); }}
           placeholder={selectedSite ? `Ask about this site…` : 'Ask Aira about the network…'}
-          className="flex-1 min-w-0 bg-transparent text-[13px] text-white placeholder:text-white/60 focus:outline-none"
-          style={{ caretColor: 'rgba(148,163,184,0.95)', color: 'rgba(255,255,255,0.90)' }}
+          className="flex-1 min-w-0 bg-transparent text-[13px] focus:outline-none"
+          style={{ color: 'rgba(255,255,255,0.95)', caretColor: '#a5b4fc' }}
           disabled={loading}
         />
 
@@ -1064,9 +1129,9 @@ export default function MapChatBar({
           <button
             onClick={() => setInput('')}
             className="shrink-0 p-1 rounded-full transition-all"
-            style={{ color: 'rgba(255,255,255,0.35)' }}
-            onMouseEnter={e => { e.currentTarget.style.color = 'rgba(255,255,255,0.70)'; e.currentTarget.style.background = 'rgba(255,255,255,0.08)'; }}
-            onMouseLeave={e => { e.currentTarget.style.color = 'rgba(255,255,255,0.35)'; e.currentTarget.style.background = 'transparent'; }}
+            style={{ color: 'rgba(255,255,255,0.50)' }}
+            onMouseEnter={e => { e.currentTarget.style.color = 'rgba(255,255,255,0.88)'; e.currentTarget.style.background = 'rgba(255,255,255,0.10)'; }}
+            onMouseLeave={e => { e.currentTarget.style.color = 'rgba(255,255,255,0.50)'; e.currentTarget.style.background = 'transparent'; }}
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -1076,14 +1141,14 @@ export default function MapChatBar({
         <button
           onClick={() => send(input)}
           disabled={!input.trim() || loading}
-          className="shrink-0 flex h-7 w-7 items-center justify-center rounded-full transition-all disabled:opacity-25 disabled:cursor-not-allowed"
+          className="shrink-0 flex h-7 w-7 items-center justify-center rounded-full transition-all disabled:opacity-30 disabled:cursor-not-allowed"
           style={input.trim() && !loading ? {
-            background: 'linear-gradient(135deg, rgba(51,65,85,0.92), rgba(30,41,59,0.82))',
-            border: '1px solid rgba(148,163,184,0.40)',
-            boxShadow: '0 4px 14px rgba(15,23,42,0.34)',
+            background: 'linear-gradient(135deg, rgba(99,102,241,0.80), rgba(67,56,202,0.70))',
+            border: '1px solid rgba(129,140,248,0.55)',
+            boxShadow: '0 4px 14px rgba(79,70,229,0.35)',
           } : {
-            background: 'rgba(255,255,255,0.07)',
-            border: '1px solid rgba(255,255,255,0.10)',
+            background: 'rgba(255,255,255,0.08)',
+            border: '1px solid rgba(255,255,255,0.12)',
           }}
         >
           <Send className="w-3 h-3 text-white" />

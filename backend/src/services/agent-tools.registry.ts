@@ -17,15 +17,34 @@ import { openai } from '../config/openai.js';
 import { dbSchemaRef } from './db-schema-reference.service.js';
 import { dataDictResolver } from './datadict-resolver.service.js';
 import { mirrorOrRemote } from './db-mirror/lib/mirror-or-remote.js';
+import { estimateQueryCost } from './query-cost-estimator.service.js';
+import {
+  validateKpiName,
+  buildKpiClarifyChips,
+  buildKpiUnknownCallout,
+} from './schema-validation.service.js';
+import { runLiveRca } from './rca-live.service.js';
+import { enrichRecommendation } from './recommendation-enricher.service.js';
+import { buildStrategy, parseRcaBucket } from './rca-strategies/index.js';
+import { findLocalEvents } from './local-events/index.js';
+import { registerClarification } from './clarification-store.js';
+import type { SseEvent } from '../types/sse-events.js';
+import { pool as pgPool } from '../config/database.js';
 
-// Shared remote DB connector for all data-query tools
+// Shared remote DB connector for targeted/fast queries (8s default)
 const remoteDb = new NaavikDBConnector();
+
+// Dedicated connector with a longer timeout for ad-hoc NL→SQL queries
+// that may involve complex joins or larger date ranges (query_data, generate_report).
+const dataQueryDb = new NaavikDBConnector(undefined, 30_000);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 export interface ToolContext {
   threadId: string;
   currentView?: string;
   contextData: Record<string, any>;
+  /** SSE event emitter — present when streaming, absent for atomic requests. */
+  onEvent?: (e: SseEvent) => void;
 }
 
 export type UiCommandType =
@@ -36,7 +55,8 @@ export type UiBlockType =
   | 'text' | 'callout' | 'chips' | 'stat_row' | 'data_table' | 'compact_table'
   | 'diagnosis_card' | 'severity_meter' | 'topology_grid'
   | 'ranked_list' | 'kpi_dashboard' | 'rca_story' | 'rca_summary' | 'map_inset'
-  | 'insight_chart' | 'tabs' | 'grid_layout';
+  | 'insight_chart' | 'tabs' | 'grid_layout'
+  | 'recommendation_card';
 
 export interface UiBlockSuggestion {
   type: UiBlockType;
@@ -54,6 +74,8 @@ export interface ToolResult {
   llmText: string;
   /** Optional UI block to render alongside the final answer. */
   uiBlock?: UiBlockSuggestion;
+  /** Additional UI blocks (e.g. callout + chips). Orchestrator stacks them. */
+  extraUiBlocks?: UiBlockSuggestion[];
   /** Optional UI command (navigation, filter, etc.) */
   uiCommand?: UiCommandSuggestion;
 }
@@ -75,10 +97,18 @@ function clampString(s: string, max = 4000): string {
   return s.slice(0, max - 20) + '… [truncated]';
 }
 
+/** Format a Date as YYYY-MM-DD in the local (wall-clock) timezone, not UTC. */
+function localDateStr(d: Date): string {
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const dy = String(d.getDate()).padStart(2, '0');
+  return `${y}-${mo}-${dy}`;
+}
+
 function todayMinus(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() - days);
-  return d.toISOString().slice(0, 10);
+  return localDateStr(d);
 }
 
 function sanitizeSiteId(id: string): string {
@@ -107,7 +137,7 @@ function clampDateRange(startDate: string, endDate: string, maxDays: number): { 
   if (daysBetween(start, end) > maxDays) {
     const newStart = new Date(end);
     newStart.setDate(newStart.getDate() - maxDays);
-    return { startDate: newStart.toISOString().slice(0, 10), endDate: end };
+    return { startDate: localDateStr(newStart), endDate: end };
   }
   return { startDate: start, endDate: end };
 }
@@ -121,22 +151,40 @@ function sanitizeKpiList(input: unknown, fallback: string[], maxItems = 8): stri
     .slice(0, maxItems);
 }
 
-/** Try fn(dateId) stepping one day back at a time until rows are returned or maxTries exhausted. */
+/**
+ * Try fn(dateId) for up to `maxTries` consecutive days going backwards from
+ * `startDate`. Returns the FIRST date that produced rows.
+ *
+ * Strategy:
+ *   - Fire ALL N attempts in parallel via Promise.allSettled so the worst
+ *     case is one round-trip wall-clock instead of N.
+ *   - Pick the freshest (largest) date that returned rows.
+ *   - Individual errors are swallowed so a single bad day doesn't poison
+ *     the others.
+ *
+ * Old behaviour: sequential 1-by-1 (up to N × remote-RT latency).
+ * New behaviour: parallel (1 × remote-RT latency).
+ */
 async function withDateFallback(
   fn: (dateId: string) => Promise<any[]>,
   startDate: string,
   maxTries = 5,
 ): Promise<{ rows: any[]; dateId: string } | null> {
+  const dates: string[] = [];
   const d = new Date(startDate);
   for (let i = 0; i < maxTries; i++) {
-    const dateId = d.toISOString().slice(0, 10);
-    try {
-      const rows = await fn(dateId);
-      if (rows.length) return { rows, dateId };
-    } catch {
-      // ignore individual date errors, try the next day
-    }
+    dates.push(localDateStr(d));
     d.setDate(d.getDate() - 1);
+  }
+  const settled = await Promise.allSettled(dates.map(async (dateId) => {
+    const rows = await fn(dateId);
+    return { dateId, rows };
+  }));
+  // Find the freshest (first in array) successful result that has rows.
+  for (const r of settled) {
+    if (r.status === 'fulfilled' && r.value.rows.length) {
+      return { rows: r.value.rows, dateId: r.value.dateId };
+    }
   }
   return null;
 }
@@ -166,27 +214,69 @@ const tool_get_worst_offenders: AgentTool = {
   async execute(args) {
     const startDate = sanitizeDate(String(args.date || todayMinus(3)));
     const limit = Math.min(20, Math.max(1, Number(args.limit) || 5));
+    const tStart = Date.now();
 
-    const found = await withDateFallback(async (dateId) => {
-      const sql = `SELECT TOP ${limit}
-        s.USID, s.degraded_category, s.rca_bucket, s.short_summary,
-        sc.subcomponent_value as impact_score
-      FROM site_table s WITH (NOLOCK)
-      LEFT JOIN subcomponent_table sc WITH (NOLOCK)
-        ON s.USID = sc.USID
-        AND CAST(s.DATE_ID AS DATE) = CAST(sc.DATE_ID AS DATE)
-        AND sc.subcomponent_name = 'Total_Impact_to_SuperKPI_Delta'
-      WHERE s.chain_of_thought IS NOT NULL
-        AND CAST(s.DATE_ID AS DATE) = CAST('${dateId}' AS DATE)
-      ORDER BY ISNULL(sc.subcomponent_value, 0) DESC`;
-      return remoteDb.query(sql);
-    }, startDate);
+    // Use the dedicated mirror.cqx_offenders_truth_table — it has
+    // total_impact_latest PRE-COMPUTED so we skip the heavy site_table ×
+    // subcomponent_table JOIN entirely. 30-day window so a stale mirror
+    // still produces SOMETHING instead of falling through to the slow
+    // remote MSSQL (which is the path that was hanging for 72s).
+    interface OffenderRow {
+      USID: string;
+      date_id: string;
+      total_impact_latest: number | null;
+      rca_bucket: string | null;
+      degraded_category: string | null;
+      short_summary: string | null;
+    }
+    const allRows = await mirrorOrRemote<OffenderRow>({
+      local: {
+        sql: `SELECT o.usid AS "USID",
+                     o.date_id::date::text AS date_id,
+                     o.total_impact_latest,
+                     s.rca_bucket,
+                     s.degraded_category,
+                     s.short_summary
+              FROM mirror.cqx_offenders_truth_table o
+              LEFT JOIN mirror.site_table s
+                ON s.usid = o.usid AND s.date_id::date = o.date_id::date
+              WHERE o.date_id::date <= $1::date
+                AND o.date_id::date >= ($1::date - INTERVAL '30 days')
+              ORDER BY o.date_id::date DESC, COALESCE(o.total_impact_latest, 0) DESC
+              LIMIT 500`,
+        params: [startDate],
+      },
+      // Avoid CAST(DATE_ID AS DATE) in WHERE — wrapping the column in a function
+      // prevents SQL Server from using the DATE_ID index, causing a full table scan.
+      // Instead bound the column directly so the engine can do an index seek.
+      remote: `SELECT TOP 500 o.USID,
+                  CAST(o.DATE_ID AS DATE) AS date_id,
+                  o.Total_Impact_Latest AS total_impact_latest,
+                  s.rca_bucket, s.degraded_category, s.short_summary
+               FROM cqx_offenders_truth_table o WITH (NOLOCK)
+               LEFT JOIN site_table s WITH (NOLOCK)
+                 ON s.USID = o.USID AND CAST(s.DATE_ID AS DATE) = CAST(o.DATE_ID AS DATE)
+               WHERE o.DATE_ID >= DATEADD(day, -7, CAST('${startDate}' AS DATE))
+                 AND o.DATE_ID  < DATEADD(day,  1, CAST('${startDate}' AS DATE))
+               ORDER BY o.DATE_ID DESC, ISNULL(o.Total_Impact_Latest, 0) DESC`,
+      tag: 'get_worst_offenders',
+      // If the local mirror is more than N days behind the requested date,
+      // fall through to the remote MSSQL automatically. Better correctness
+      // > raw latency in that situation. Tunable via MIRROR_MAX_STALENESS_DAYS.
+      staleness: { requestedDate: startDate, dateColumn: 'date_id' },
+    });
+    logger.info(`[tool:get_worst_offenders] fetch ${Date.now() - tStart}ms (${allRows.length} rows · window ending ${startDate})`);
 
-    if (!found) {
+    if (!allRows.length) {
       return { llmText: `No worst-offender data found near ${startDate}. The AI analysis pipeline may not have run for recent dates.` };
     }
 
-    const { rows, dateId } = found;
+    // Pick the freshest available date in the window, then take the top N
+    // offenders for that date by impact score.
+    const dateId = String(allRows[0].date_id).slice(0, 10);
+    const rows = allRows
+      .filter((r) => String(r.date_id).slice(0, 10) === dateId)
+      .slice(0, limit);
 
     const parseRcaBucket = (raw: any): string => {
       const s = String(raw || '');
@@ -222,24 +312,22 @@ const tool_get_worst_offenders: AgentTool = {
     const tableRows = rows.map((r) => ({
       USID: String(r.USID || '—'),
       'Degraded KPI': parseDegradedCategory(r.degraded_category),
-      'CQX Value': r.impact_score != null ? Number(r.impact_score).toFixed(2) : '—',
+      'CQX Value': r.total_impact_latest != null ? Number(r.total_impact_latest).toFixed(2) : '—',
       'RCA Category': parseRcaBucket(r.rca_bucket) || String(r.degraded_category || '—'),
       __shortSummaryTooltip: String(r.short_summary || ''),
     }));
 
-    const llmText = clampString(
-      `Found ${rows.length} worst offenders for ${dateId}:\n` +
-        tableRows.map((r, i) => `${i + 1}. ${r.USID} — ${r['RCA Category']}`).join('\n'),
-    );
+    // Keep llmText to just a headline — the full table is in the uiBlock and the
+    // model must not echo it as a bullet list (system-prompt strict-no-duplication rule).
+    const llmText = `Found ${rows.length} worst offenders for ${dateId}. Data shown in the card above.`;
 
-    return {
-      llmText,
-      uiBlock: {
-        type: 'data_table',
-        title: `Worst Offenders · ${dateId}`,
-        data: { title: `Worst Offenders · ${dateId}`, rows: tableRows, rowTooltipField: '__shortSummaryTooltip' },
-      },
+    const tableBlock = {
+      type: 'data_table' as const,
+      title: `Worst Offenders · ${dateId}`,
+      data: { title: `Worst Offenders · ${dateId}`, rows: tableRows, rowTooltipField: '__shortSummaryTooltip' },
     };
+
+    return { llmText, uiBlock: tableBlock };
   },
 };
 
@@ -266,39 +354,264 @@ const tool_get_site_rca: AgentTool = {
     if (!rawId) return { llmText: 'siteId is required.' };
     const siteId = sanitizeSiteId(rawId);
     const startDate = sanitizeDate(String(args.date || todayMinus(3)));
+    const tStart = Date.now();
 
-    const found = await withDateFallback(async (dateId) => {
-      const sql = `SELECT TOP 1
-        USID, CAST(DATE_ID AS DATE) as date_id,
-        rca_bucket, short_summary, chain_of_thought
-      FROM site_table WITH (NOLOCK)
-      WHERE USID = '${siteId}'
-        AND CAST(DATE_ID AS DATE) = CAST('${dateId}' AS DATE)
-        AND chain_of_thought IS NOT NULL`;
-      return remoteDb.query(sql);
-    }, startDate);
+    // Query the mirror with a wide 60-day lookback so we serve the most recent
+    // available RCA even when the pipeline is days or weeks behind.
+    // noFallback: true — RCA is precomputed; if the mirror has ANY row for this
+    // site we use it rather than hanging on the remote when the pipeline date
+    // doesn't match the requested date.
+    const rcaRows = await mirrorOrRemote<{
+      USID: string;
+      date_id: string;
+      rca_bucket: string;
+      short_summary: string;
+      chain_of_thought: string;
+    }>({
+      local: {
+        sql: `SELECT usid AS "USID", date_id::date::text AS date_id,
+                     rca_bucket, short_summary, chain_of_thought
+              FROM mirror.site_table
+              WHERE usid = $1
+                AND chain_of_thought IS NOT NULL
+                AND date_id::date <= $2::date
+                AND date_id::date >= ($2::date - INTERVAL '60 days')
+              ORDER BY date_id DESC
+              LIMIT 1`,
+        params: [siteId, startDate],
+      },
+      remote: `SELECT TOP 1 USID, CAST(DATE_ID AS DATE) as date_id,
+                  rca_bucket, short_summary, chain_of_thought
+               FROM site_table WITH (NOLOCK)
+               WHERE USID = '${siteId}'
+                 AND chain_of_thought IS NOT NULL
+                 AND CAST(DATE_ID AS DATE) <= CAST('${startDate}' AS DATE)
+                 AND CAST(DATE_ID AS DATE) >= DATEADD(day, -60, CAST('${startDate}' AS DATE))
+               ORDER BY DATE_ID DESC`,
+      tag: 'get_site_rca:row',
+      noFallback: true,   // If local has a row, use it — don't wait on remote
+    });
+    logger.info(`[tool:get_site_rca] row fetch ${Date.now() - tStart}ms (${rcaRows.length} rows)`);
 
-    if (!found) {
+    if (!rcaRows.length) {
       return { llmText: `No RCA found for site ${siteId} near ${startDate}. Site may not be in the degraded set or AI analysis not yet run.` };
     }
 
-    const { rows, dateId } = found;
-    const row = rows[0];
+    const row = rcaRows[0];
+    const dateId = String(row.date_id).slice(0, 10);
     const summary = String(row.short_summary || '').slice(0, 600);
-    const bucket = String(row.rca_bucket || 'Unknown');
-    const chainOfThought = row.chain_of_thought ? String(row.chain_of_thought).slice(0, 3000) : undefined;
+    const rawBucket = row.rca_bucket;
+    const chainOfThought = row.chain_of_thought ? String(row.chain_of_thought) : undefined;
 
-    const llmText = clampString(
-      `RCA for site ${siteId} on ${dateId}:\nBucket: ${bucket}\nSummary: ${summary}`,
-    );
+    // Parse rca_bucket — site_table stores it as JSON ({text, details[]})
+    // for some sites, plain string for others. parseRcaBucket handles both.
+    const parsed = parseRcaBucket(rawBucket);
+
+    // Run strategy + parameter enrichment IN PARALLEL — they're independent
+    // and both can take 500ms-2s on a cold cache. Doing them sequentially
+    // was the dominant latency contributor.
+    const syntheticRca = {
+      siteId,
+      date: dateId,
+      status: 'success' as const,
+      reasoning: chainOfThought ?? '',
+      buckets: parsed.name && parsed.name !== 'Unknown'
+        ? [{ bucket: parsed.name, confidence: parsed.confidence ?? 0.85 }]
+        : [],
+      solutionText: summary || undefined,
+      solutionCategory: parsed.name && parsed.name !== 'Unknown' ? parsed.name : undefined,
+      intuitions: {},
+    };
+    const tFanout = Date.now();
+    const [strategy, paramPlan] = await Promise.all([
+      buildStrategy({
+        siteId,
+        date: dateId,
+        bucketName: parsed.name,
+        bucketConfidence: parsed.confidence,
+        alternativeBuckets: parsed.alternatives,
+        reasoning: chainOfThought,
+        solutionText: summary,
+      }),
+      enrichRecommendation(syntheticRca, { bucketHint: parsed.name }),
+    ]);
+    logger.info(`[tool:get_site_rca] strategy + param plan in ${Date.now() - tFanout}ms · TOTAL ${Date.now() - tStart}ms`);
+
+    const llmText =
+      `RCA ready for site ${siteId} · ${dateId}. ` +
+      `Bucket: ${parsed.name}${parsed.confidence ? ` (${Math.round(parsed.confidence * 100)}%)` : ''}. ` +
+      `Full analysis shown in UI cards.`;
+
+    return {
+      llmText,
+      // Primary: evidence card — map, KPI signals, root-cause chain
+      uiBlock: {
+        type: 'rca_summary',
+        title: `RCA · ${siteId}`,
+        data: {
+          siteId,
+          date: dateId,
+          bucket: parsed.name,
+          summary,
+          chainOfThought: chainOfThought?.slice(0, 3000),
+        },
+      },
+      // Secondary: recommended actions + parameter plan
+      extraUiBlocks: [
+        {
+          type: 'recommendation_card',
+          title: 'Recommended change',
+          data: {
+            siteId,
+            date: dateId,
+            plan: {
+              category: parsed.name,
+              confidenceLevel: strategy.confidence ?? paramPlan.confidenceLevel,
+              headline: strategy.headline,
+              reasoning: chainOfThought,
+              actions: strategy.actions,
+              alternatives: parsed.alternatives,
+              parameters: paramPlan.parameters,
+              freeText: strategy.freeText,
+            },
+          },
+        },
+      ],
+    } as any;
+  },
+};
+
+/**
+ * Run an RCA on demand against the live `services/rca` pipeline.
+ *
+ * Use ONLY when:
+ *   - `get_site_rca` returned no precomputed RCA for the requested site, OR
+ *   - The user explicitly asks for a "fresh" / "live" / "on-demand" RCA, OR
+ *   - The site isn't an offender today (no chain_of_thought) but the user
+ *     still wants a root-cause investigation.
+ *
+ * Slow tool — 30 to 180 seconds. The agent should NOT call it speculatively.
+ */
+const tool_run_rca_live: AgentTool = {
+  name: 'run_rca_live',
+  description:
+    'Run a fresh root-cause analysis on a site by calling the live RCA service. ' +
+    'PRECONDITION: ONLY call this if get_site_rca was ALREADY tried on the same ' +
+    'siteId+date IN THIS TURN and returned a "No RCA found" message. Do not call ' +
+    'speculatively, do not call as the first action — always try get_site_rca first. ' +
+    'Also acceptable: the user explicitly used the words "live RCA", "fresh RCA", ' +
+    '"run RCA on the fly", or "rerun RCA". Slow (30-180s). Falls back to the ' +
+    'precomputed mirror automatically if the live service is unreachable.',
+  parameters: {
+    type: 'object',
+    properties: {
+      siteId: { type: 'string', description: 'Site USID to investigate.' },
+      date: { type: 'string', description: 'Date in YYYY-MM-DD. Defaults to 3 days ago.' },
+      fresh: {
+        type: 'boolean',
+        description: 'Skip the 15-minute result cache. Use only when the user asks to re-run.',
+      },
+    },
+    required: ['siteId'],
+  },
+  async execute(args) {
+    const siteId = sanitizeSiteId(String(args.siteId || '').trim());
+    if (!siteId) return { llmText: 'siteId is required.' };
+    const date = sanitizeDate(String(args.date || todayMinus(3)));
+    const fresh = Boolean(args.fresh);
+
+    logger.info(`[tool:run_rca_live] siteId=${siteId} date=${date} fresh=${fresh}`);
+    const rca = await runLiveRca({ siteId, date, fresh });
+
+    // Decision #5 — no degradation: just say so in chat, no lens, no card.
+    if (rca.status === 'no_degradation') {
+      return {
+        llmText:
+          `Live RCA completed for site ${siteId} on ${date} — no degradation detected. ` +
+          `All intuitions came back clear.`,
+        uiBlock: {
+          type: 'callout',
+          data: {
+            tone: 'success',
+            title: `All clear for site ${siteId}`,
+            text: `The live RCA pipeline reviewed every intuition for site ${siteId} on ${date} and did not flag any degradation. No parameter changes recommended.`,
+          },
+        },
+      };
+    }
+
+    if (rca.status === 'error') {
+      // Live service unreachable AND no mirror data — return a friendly callout
+      // that tells the user what to do, instead of dumping the raw fetch error.
+      const live = rca.error || 'unknown error';
+      const looksLikeUnreachable = /fetch failed|ECONNREFUSED|ENOTFOUND|abort/i.test(live);
+      return {
+        llmText:
+          `RCA for site ${siteId} on ${date}: no precomputed RCA in the mirror, and the live RCA service is unreachable (${live}).`,
+        uiBlock: {
+          type: 'callout',
+          data: {
+            tone: 'warning',
+            title: `No RCA available for site ${siteId}`,
+            text: looksLikeUnreachable
+              ? `The live RCA service at RCA_SERVICE_URL isn't responding, and site ${siteId} doesn't have a precomputed RCA in the last 30 days. ` +
+                `Options: (1) ask about a known offender site that has a precomputed RCA, (2) start the live RCA service (cd services/rca && uvicorn main:app --port 9444), or (3) check Settings → Integrations for service health.`
+              : `Both the precomputed and live paths returned nothing. Live service said: ${live}.`,
+          },
+        },
+      };
+    }
+
+    // Success — build the recommendation plan + a compact rca_summary block.
+    const paramPlan = await enrichRecommendation(rca);
+    // Live RCA: run the strategy module too so the card shows action-shaped
+    // recommendations (traffic_balancer, layer_balancer, etc.).
+    const topBucket = rca.buckets[0]?.bucket ?? 'Unknown';
+    const topConf = rca.buckets[0]?.confidence ?? 0;
+    const strategy = await buildStrategy({
+      siteId,
+      date,
+      bucketName: topBucket,
+      bucketConfidence: topConf,
+      alternativeBuckets: rca.buckets,
+      reasoning: rca.reasoning,
+      solutionText: rca.solutionText,
+    });
+    const plan = {
+      ...paramPlan,
+      headline: strategy.headline,
+      confidenceLevel: strategy.confidence ?? paramPlan.confidenceLevel,
+      actions: strategy.actions,
+      alternatives: rca.buckets,
+    };
+    const intuitionCount = Object.keys(rca.intuitions).length;
+    const llmText =
+      `Live RCA ready for site ${siteId} · ${date}. ` +
+      `Top bucket: ${topBucket} (${Math.round(topConf * 100)}%). ` +
+      `Full analysis shown in UI cards.`;
+
     return {
       llmText,
       uiBlock: {
         type: 'rca_summary',
-        title: `RCA · ${siteId}`,
-        data: { siteId, date: dateId, bucket, summary, chainOfThought },
+        title: `Live RCA · ${siteId}`,
+        data: {
+          siteId,
+          date,
+          bucket: topBucket,
+          summary: plan.headline || rca.solutionText || '',
+          chainOfThought: rca.reasoning,
+          isLive: true,
+        },
       },
-    };
+      extraUiBlocks: [
+        {
+          type: 'recommendation_card',
+          title: 'Recommended change',
+          data: { siteId, date, plan },
+        },
+      ],
+    } as any;
   },
 };
 
@@ -321,6 +634,33 @@ const tool_get_site_kpis: AgentTool = {
     const siteId = sanitizeSiteId(rawId);
     const startDate = sanitizeDate(String(args.date || todayMinus(3)));
 
+    // Try local mirror first (fast, always available)
+    // pgPool is imported at module top-level
+    const localKpiResult = await pgPool.query(
+      `SELECT kpi_name, AVG(kpi_value::float) as kpi_value, MAX(date_id::date)::text as date_id
+       FROM mirror.intermediate_kpi_table
+       WHERE usid = $1
+         AND date_id::date = (
+           SELECT MAX(date_id::date) FROM mirror.intermediate_kpi_table WHERE usid = $1
+         )
+       GROUP BY kpi_name ORDER BY kpi_name LIMIT 30`,
+      [siteId],
+    ).catch(() => null);
+
+    if (localKpiResult && localKpiResult.rows.length > 0) {
+      const dateId = localKpiResult.rows[0].date_id?.slice(0, 10) || startDate;
+      const rows = localKpiResult.rows;
+      const items = rows.slice(0, 8).map((r: any) => ({
+        label: String(r.kpi_name).replace(/_/g, ' '),
+        value: r.kpi_value != null ? String(Number(r.kpi_value).toPrecision(4)) : '—',
+      }));
+      const llmText = `KPIs for site ${siteId} on ${dateId} shown in the card above (${rows.length} metrics).`;
+      return {
+        llmText,
+        uiBlock: { type: 'stat_row', title: `${siteId} · KPIs · ${dateId}`, data: { items } },
+      };
+    }
+
     const found = await withDateFallback(async (dateId) => {
       const sql = `SELECT TOP 30
         kpi_name, AVG(CAST(kpi_value AS FLOAT)) as kpi_value,
@@ -342,10 +682,7 @@ const tool_get_site_kpis: AgentTool = {
       label: String(r.kpi_name).replace(/_/g, ' '),
       value: r.kpi_value != null ? String(Number(r.kpi_value).toPrecision(4)) : '—',
     }));
-    const llmText = clampString(
-      `KPIs for ${siteId} on ${dateId}:\n` +
-        rows.map((r: any) => `• ${r.kpi_name} = ${r.kpi_value}`).join('\n'),
-    );
+    const llmText = `KPIs for site ${siteId} on ${dateId} shown in the card above (${rows.length} metrics).`;
     return {
       llmText,
       uiBlock: { type: 'stat_row', title: `${siteId} · KPIs · ${dateId}`, data: { items } },
@@ -357,20 +694,33 @@ const tool_get_site_kpis: AgentTool = {
 const tool_show_kpi_dashboard: AgentTool = {
   name: 'show_kpi_dashboard',
   description:
-    'Render an interactive KPI trend dashboard for a site directly in the chat. ' +
-    'Use for ALL of these: "dashboard for site X", "show KPI dashboard", "create a dashboard for X", ' +
-    '"show me DL_VOL_GB for site 9817", "plot DATA_DROP_RATE for 13081", ' +
-    '"trend of AVG_DL_PRB_UTIL for USID 9817", "show KPI X for site Y", ' +
-    '"chart KPI X for site Y over N days" — any KPI visualization request for a specific site. ' +
+    'Render an interactive KPI trend dashboard directly in the chat. ' +
+    'Use for: "dashboard for site X", "show KPI dashboard", "create a dashboard for X", ' +
+    '"show me DL_VOL_GB for site 9817", "plot DATA_DROP_RATE for 13081", "trend of AVG_DL_PRB_UTIL", ' +
+    '"chart KPI X for site Y over N days" — any KPI visualization request. ' +
     'ALWAYS prefer this over query_data when the user names a specific site/USID. ' +
-    'For MULTIPLE KPIs pass all names in the kpiNames array — the dashboard renders all together. ' +
-    'User can also interactively add/remove KPIs from the rendered dashboard.',
+    '\n\n' +
+    'IMPORTANT — single call for multiple sites:\n' +
+    'When the user wants KPI trends for several sites (e.g. "top 3 offenders", "USIDs 9787 and 13081"), ' +
+    'call this tool ONCE with `siteIds: ["9787","13081",...]` — do NOT call it once per site. ' +
+    'The dashboard renders a single card with a USID switcher so the user can compare without scrolling ' +
+    'through duplicate panels.\n\n' +
+    'For multiple KPIs pass all names in `kpiNames` — the dashboard renders all together. ' +
+    'Users can interactively add/remove KPIs or switch USIDs from the rendered dashboard.',
   parameters: {
     type: 'object',
     properties: {
       siteId: {
         type: 'string',
-        description: 'Site USID or display ID (e.g. "9817", "13081").',
+        description: 'Single site USID (e.g. "9817"). Use for a single-site dashboard.',
+      },
+      siteIds: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          'Multiple site USIDs for ONE dashboard with a switcher. ' +
+          'Preferred over multiple tool calls when the user asks about several sites. ' +
+          'The first ID is the initial selection; the rest are available via the dashboard USID input.',
       },
       kpiNames: {
         type: 'array',
@@ -389,26 +739,82 @@ const tool_show_kpi_dashboard: AgentTool = {
         description: 'daily (default) or hourly granularity.',
       },
     },
-    required: ['siteId'],
   },
   async execute(args) {
-    const siteId = String(args.siteId || '').trim();
-    if (!siteId) return { llmText: 'siteId is required.' };
-    const kpiNames =
+    // Accept either `siteId` (single) or `siteIds[]` (multi). Normalise to a
+    // de-duped list and use the first as the initial render.
+    const rawIds: string[] = Array.isArray(args.siteIds)
+      ? args.siteIds
+          .filter((s: any) => typeof s === 'string' && s.trim())
+          .map((s: any) => String(s).trim())
+      : [];
+    if (args.siteId && typeof args.siteId === 'string' && args.siteId.trim()) {
+      rawIds.unshift(String(args.siteId).trim());
+    }
+    const siteIdList = Array.from(new Set(rawIds));
+    if (!siteIdList.length) {
+      return { llmText: 'siteId or siteIds is required.' };
+    }
+    const siteId = siteIdList[0];
+    const rawKpis =
       Array.isArray(args.kpiNames) && args.kpiNames.length
         ? args.kpiNames
             .filter((k: any) => typeof k === 'string' && k.trim())
-            .map((k: any) => String(k).trim().toUpperCase())
+            .map((k: any) => String(k).trim())
         : undefined;
+
+    // A1 — pre-flight KPI validation against live schema + DataDict
+    let resolvedKpis: string[] | undefined;
+    if (rawKpis?.length) {
+      const resolved: string[] = [];
+      const originalQuery = String((args as any)._originalQuery || rawKpis.join(', '));
+      for (const k of rawKpis) {
+        const res = validateKpiName(k);
+        if (res.kind === 'ok') {
+          resolved.push(res.resolved);
+        } else if (res.kind === 'clarify') {
+          logger.info(`[tool:show_kpi_dashboard] KPI "${k}" needs clarification (${res.candidates.length} candidates)`);
+          return {
+            llmText:
+              `The KPI "${k}" doesn't match anything in the live schema. ` +
+              `Closest matches: ${res.candidates.map((c) => `${c.label} (${Math.round(c.confidence * 100)}%)`).join(', ')}. ` +
+              `Asked the user to pick one.`,
+            uiBlock: buildKpiClarifyChips(k, res.candidates, `show ${k} for site ${siteId}`),
+          };
+        } else {
+          logger.info(`[tool:show_kpi_dashboard] KPI "${k}" unknown — emitting callout`);
+          return {
+            llmText:
+              `Cannot render dashboard: KPI "${k}" does not exist in the database and has no close match. ` +
+              `Try a real KPI name like DL_DRB_TPUT, DATA_RAN_ACC, HOSR, or DL_PKTLOSS_RT.`,
+            uiBlock: buildKpiUnknownCallout(k),
+          };
+        }
+      }
+      resolvedKpis = resolved;
+    }
+
     const daysBack = Math.min(90, Math.max(1, Number(args.daysBack) || 30));
     const timeframe = args.timeframe === 'hourly' ? 'hourly' : 'daily';
+    const siteSummary = siteIdList.length > 1
+      ? `${siteIdList.length} sites (${siteIdList.join(', ')})`
+      : `site ${siteId}`;
     return {
-      llmText: kpiNames?.length
-        ? `Rendered KPI dashboard for site ${siteId} showing: ${kpiNames.join(', ')}.`
-        : `Rendered KPI dashboard for site ${siteId}.`,
+      llmText: resolvedKpis?.length
+        ? `Rendered KPI dashboard for ${siteSummary} showing: ${resolvedKpis.join(', ')}.`
+        : `Rendered KPI dashboard for ${siteSummary}.`,
       uiBlock: {
         type: 'kpi_dashboard',
-        data: { siteId, timeframe, daysBack, ...(kpiNames ? { kpiNames } : {}) },
+        data: {
+          siteId,
+          // When more than one USID was requested, expose the full list so the
+          // dashboard's USID switcher knows which sites to offer. The component
+          // renders ONE card; the user flips between sites without scroll.
+          ...(siteIdList.length > 1 ? { availableSiteIds: siteIdList } : {}),
+          timeframe,
+          daysBack,
+          ...(resolvedKpis ? { kpiNames: resolvedKpis } : {}),
+        },
       },
     };
   },
@@ -510,14 +916,33 @@ const tool_find_site: AgentTool = {
     if (!q) return { llmText: 'query is required.' };
 
     try {
-      const sql = `SELECT TOP 5 DISTINCT USID
+      // Try local mirror first (fast, always available)
+      // pgPool is imported at module top-level
+      const localResult = await pgPool.query(
+        `SELECT DISTINCT usid AS "USID", site_name, city AS "CITY", state AS "STATE"
+         FROM mirror.site_table
+         WHERE usid::text LIKE $1 OR LOWER(site_name) LIKE $2
+         ORDER BY "USID" LIMIT 5`,
+        [`%${q}%`, `%${q.toLowerCase()}%`],
+      );
+      if (localResult.rows.length > 0) {
+        const llmText = `Found ${localResult.rows.length} matching site(s) (local mirror):\n` +
+          localResult.rows.map((r: any) => `• USID=${r.USID}  ${r.site_name || ''}  ${r.CITY || ''}${r.STATE ? ', ' + r.STATE : ''}`).join('\n');
+        return { llmText };
+      }
+
+      // Fall back to remote if mirror had no match
+      const sql = `SELECT DISTINCT TOP 5
+          CAST(USID AS VARCHAR(64)) AS USID,
+          site_name, CITY, STATE
         FROM site_table WITH (NOLOCK)
-        WHERE USID LIKE '%${q}%'
+        WHERE CAST(USID AS VARCHAR(64)) LIKE '%${q}%'
+           OR site_name LIKE '%${q}%'
         ORDER BY USID`;
       const rows = await remoteDb.query(sql);
-      if (!rows.length) return { llmText: `No site found matching "${q}". Try a different partial USID.` };
+      if (!rows.length) return { llmText: `No site found matching "${q}". Try a different partial USID or site name.` };
       const llmText = `Found ${rows.length} matching site(s):\n` +
-        rows.map((r: any) => `• USID=${r.USID}`).join('\n');
+        rows.map((r: any) => `• USID=${r.USID}  ${r.site_name || ''}  ${r.CITY || ''}${r.STATE ? ', ' + r.STATE : ''}`).join('\n');
       return { llmText };
     } catch (err) {
       return { llmText: `Site lookup failed: ${(err as Error).message}` };
@@ -879,62 +1304,129 @@ ORDER BY USID`;
 const tool_query_data: AgentTool = {
   name: 'query_data',
   description:
-    'Query the network database with natural language and instantly visualize the ' +
-    'results as a chart or table in the chat. Use for: "show me...", "chart the...", ' +
-    '"visualize...", "plot...", "what is the trend of...", "compare...", ' +
-    '"how many sites have...", "analyze..." — any request that needs live data + a visual.',
+    'Execute a T-SQL SELECT query against the full network database and render ' +
+    'the results as a chart or table in chat. Write the SQL yourself using the ' +
+    'schema and T-SQL rules in the system prompt. Any site, any table. ' +
+    'Use for KPI lookups, trends, config diffs, ticket history, site counts, ' +
+    'cluster comparisons — any data retrieval not covered by a dedicated tool.',
   parameters: {
     type: 'object',
     properties: {
-      query: {
+      sql: {
         type: 'string',
-        description: 'Natural language description of the data you want.',
+        description:
+          'T-SQL SELECT query (SQL Server syntax). Rules: ' +
+          'SELECT TOP N (not LIMIT); WITH (NOLOCK) on every table; ' +
+          'date filter: CAST(DATE_ID AS DATE) = CAST(\'YYYY-MM-DD\' AS DATE) for point-in-time, ' +
+          'DATE_ID >= DATEADD(day, -N, GETDATE()) for ranges; ' +
+          'trend cap TOP 500; snapshot cap TOP 50; no INSERT/UPDATE/DELETE/DROP.',
       },
-      dateId: {
+      title: {
         type: 'string',
-        description: 'Optional date context (YYYY-MM-DD). Defaults to 3 days ago.',
+        description: 'Optional chart/table title shown above the result (max 80 chars).',
       },
     },
-    required: ['query'],
+    required: ['sql'],
   },
   async execute(args) {
-    const query = String(args.query || '').trim();
-    const dateId = args.dateId ? String(args.dateId) : todayMinus(3);
-    if (!query) return { llmText: 'query is required.' };
+    const sql = String(args.sql || '').trim();
+    const title = args.title ? String(args.title).slice(0, 80) : '';
+    if (!sql) return { llmText: 'sql is required.' };
+    if (!sql.toUpperCase().trimStart().startsWith('SELECT')) {
+      return { llmText: 'GUARDRAIL: Only SELECT statements are permitted.' };
+    }
 
     const start = Date.now();
-    let sql = '';
     try {
-      // 1. Generate T-SQL for remote MSSQL
-      sql = await generateMssqlQuery(query, dateId);
       logger.info(`[tool:query_data] SQL: ${sql.slice(0, 200)}`);
 
-      // 2. Execute via remote DB connector
-      const rows: Record<string, any>[] = await remoteDb.query(sql);
+      // 1b. Cost-gate the query BEFORE hitting the DB. If it would scan
+      // millions of rows or is missing required filters, refuse to execute
+      // and instead emit a friendly callout with suggestion chips.
+      const cost = estimateQueryCost(sql);
+      if (cost.warningLevel === 'red') {
+        logger.warn(`[tool:query_data] cost gate REJECTED: ${cost.reasons.join(' ')}`);
+        const suggestionChips = (() => {
+          const chips: Array<{ label: string; value: string; description?: string }> = [];
+          if (cost.missingRequiredFilters.some((f) => f.endsWith('.USID'))) {
+            chips.push({ label: 'Pick a site', value: `Add a USID filter to: ${title || sql.slice(0, 60)}`, description: 'add a USID' });
+          }
+          if (cost.missingRequiredFilters.some((f) => f.endsWith('.DATE_ID'))) {
+            chips.push({ label: 'Last 7 days', value: `Narrow to last 7 days: ${title || sql.slice(0, 60)}`, description: 'narrow the time window' });
+          }
+          chips.push({ label: 'Top 50 offenders only', value: 'Retry with top 50 offender sites only', description: 'small, fast result' });
+          chips.push({ label: 'Cancel', value: 'cancel this query', description: 'don\'t run' });
+          return chips;
+        })();
+        const callout: UiBlockSuggestion = {
+          type: 'callout',
+          data: {
+            tone: 'warning',
+            title: 'This query would scan too much data',
+            text:
+              `${cost.reasons.join(' ')}\n\nEstimated: ${(cost.estimatedMs / 1000).toFixed(0)}s · ~${cost.estimatedRows.toLocaleString()} rows scanned.\n\n${cost.suggestions.join(' ')}`,
+          },
+        };
+        const chipsBlock: UiBlockSuggestion = {
+          type: 'chips',
+          data: {
+            prompt: 'How would you like to narrow it?',
+            chips: suggestionChips,
+          },
+        };
+        // Return both blocks — the renderer will stack them. We return the
+        // callout as the primary uiBlock and the chips bundled into llmText
+        // via a chips reference so the synthesis knows what's pending.
+        return {
+          llmText:
+            `Query blocked by cost gate. ${cost.reasons.join(' ')} ` +
+            `Missing filters: ${cost.missingRequiredFilters.join(', ') || 'none'}. ` +
+            `Suggestions surfaced as chips. The user must pick one before re-running.`,
+          uiBlock: callout,
+          // Stash the chips so the orchestrator can also surface them.
+          // (Tool result currently supports a single uiBlock; chips ride alongside via llmText for now.)
+          extraUiBlocks: [chipsBlock],
+        } as any;
+      }
+      if (cost.warningLevel === 'yellow') {
+        logger.info(`[tool:query_data] cost gate YELLOW: ${cost.reasons.join(' ')}`);
+      }
+
+      // 2. Check instance-level circuit breaker (connection errors only — not timeouts)
+      if (dataQueryDb.isUnreachable()) {
+        return {
+          llmText: 'Remote database is temporarily unreachable (connection refused). Please try again in a minute.',
+          uiBlock: { type: 'callout', data: { tone: 'warning', title: 'Remote DB unavailable', text: 'The remote database is not responding right now. Data shown elsewhere may be from the local mirror.' } },
+        };
+      }
+
+      // 3. Execute via the data-query connector (30s timeout — ad-hoc queries can be slow)
+      const rows: Record<string, any>[] = await dataQueryDb.query(sql);
       const execMs = Date.now() - start;
 
       if (!rows.length) {
         return {
-          llmText: `Query returned 0 rows for: "${query}"`,
+          llmText: `Query returned 0 rows.`,
           uiBlock: {
             type: 'callout',
-            data: { tone: 'info', title: 'No data found', text: `No rows returned for this query on ${dateId}.` },
+            data: { tone: 'info', title: 'No data found', text: 'No rows returned for this query.' },
           },
         };
       }
 
-      // 3. Generate chart
-      const chart = await ChartGeneratorService.generateChartOption(rows, query);
+      // Generate chart using fast heuristic (no LLM — instant)
+      const chartTitle = title || sql.replace(/\s+/g, ' ').slice(0, 70);
+      const chart = await ChartGeneratorService.generateChartOption(rows, chartTitle);
       const execSummary = `${rows.length} rows · ${execMs}ms`;
-      const sqlSnippet = sql.replace(/\s+/g, ' ').trim().slice(0, 120);
+      const sqlSnippet = sql.replace(/\s+/g, ' ').trim();
 
       if (chart.preferTable) {
         return {
-          llmText: `Query returned ${rows.length} rows. Displayed as table.`,
+          llmText: `Query returned ${rows.length} rows in ${execMs}ms. Displayed as table.`,
           uiBlock: {
             type: 'data_table',
             title: chart.title,
-            data: { title: chart.title, rows: rows.slice(0, 200) },
+            data: { title: title || chart.title, rows: rows.slice(0, 200) },
           },
         };
       }
@@ -946,9 +1438,9 @@ const tool_query_data: AgentTool = {
         llmText: `Query returned ${rows.length} rows in ${execMs}ms. Rendered as ${chart.chartType} chart.`,
         uiBlock: {
           type: 'insight_chart',
-          title: chart.title,
+          title: title || chart.title,
           data: {
-            title: chart.title,
+            title: title || chart.title,
             subtitle: chart.subtitle ? `${chart.subtitle} · ${execSummary}` : execSummary,
             source: sqlSnippet,
             height: chartHeight,
@@ -1023,7 +1515,7 @@ ORDER BY sc.subcomponent_value DESC`,
 
     for (const { label, sql } of reportQueries) {
       try {
-        const rows: Record<string, any>[] = await remoteDb.query(sql);
+        const rows: Record<string, any>[] = await dataQueryDb.query(sql);
         if (!rows.length) continue;
         const chart = await ChartGeneratorService.generateChartOption(rows, label);
         if (!chart.preferTable && Object.keys(chart.echartsOption).length > 0) {
@@ -1338,14 +1830,8 @@ const tool_get_site_topology: AgentTool = {
 
     const bandsStr = [...bands].join(', ') || 'unknown';
     const anomalousCells = cellRows.filter((r: any) => r.anomaly_flag).length;
-    const llmText = clampString(
-      `USID ${usid} · ${site.site_name || '?'} · ${site.CITY || ''}, ${site.STATE || ''}\n` +
-      `Structure: ${site.SITE_TYPE || '?'} / ${site.STRUCTURE_TOWER_TYPE || '?'}\n` +
-      `Cluster: ${site.CLUSTERID || '?'} (${site.CLUSTERNAME || '?'})\n` +
-      `Cells: ${cellRows.length} | Bands: ${bandsStr}\n` +
-      `Anomalous cells: ${anomalousCells}/${cellRows.length}\n` +
-      tiles.map((t: any) => `• ${t.cellName}: ${t.tech} ${t.band} Az=${t.azimuth ?? '—'}° ${t.anomaly ? '⚠' : ''}`).join('\n'),
-    );
+    // Headline only — full cell inventory is in the topology_grid uiBlock.
+    const llmText = `Topology for USID ${usid} (${site.site_name || '?'}, ${site.CITY || ''}): ${cellRows.length} cells on ${bandsStr}${anomalousCells ? `, ${anomalousCells} anomalous` : ''}. Details shown in card above.`;
 
     return {
       llmText,
@@ -1462,13 +1948,8 @@ const tool_get_config_changes: AgentTool = {
       'New Value': String(r.New_Value ?? '—'),
     }));
 
-    // The llmText is sent to the LLM (4 KB cap via clampString). Show first ~20 in the
-    // textual summary; the full set is rendered in the data_table UI below.
-    const llmText = clampString(
-      `Config changes for USID ${usid} (${startDate} → ${endDate}): ${rows.length} changes\n` +
-      tableRows.slice(0, 20).map((r) => `• ${r.Date} ${r.Cell}: ${r.Parameter} ${r['Old Value']} → ${r['New Value']}`).join('\n') +
-      (impactNote ? `\n\nPotential impact:\n${impactNote}` : ''),
-    );
+    // Headline only — full change log is in the compact_table uiBlock.
+    const llmText = `Config changes for USID ${usid} (${startDate} → ${endDate}): ${rows.length} change${rows.length !== 1 ? 's' : ''} shown in the card above.${impactNote ? ` Potential impact: ${impactNote.slice(0, 120)}` : ''}`;
 
     return {
       llmText,
@@ -1662,12 +2143,8 @@ const tool_get_ret_changes: AgentTool = {
     });
 
     const changed = tableRows.filter((r) => r.Changed !== '—');
-    const llmText = clampString(
-      `RET data for USID ${usid} (${startFound?.dateId || startDate} → ${endFound.dateId}):\n` +
-      `Sectors: ${endRows.length} | Tilt changes detected: ${changed.length}\n` +
-      (changed.length ? `Changed sectors:\n${changed.map((r) => `  ${r.Sector} (${r.Label}): ${r.Changed}`).join('\n')}\n` : 'No tilt changes detected between the two snapshots.\n') +
-      tableRows.map((r) => `• ${r.Sector} ${r.Label}: tilt=${r['Tilt (current)']} min=${r.Min} max=${r.Max} model=${r.Model}`).join('\n'),
-    );
+    // Headline only — full tilt table is in the compact_table uiBlock.
+    const llmText = `RET tilts for USID ${usid} (${startFound?.dateId || startDate} → ${endFound.dateId}): ${endRows.length} sector${endRows.length !== 1 ? 's' : ''}, ${changed.length} tilt change${changed.length !== 1 ? 's' : ''} detected. Details shown in card above.`;
 
     return {
       llmText,
@@ -1765,11 +2242,8 @@ const tool_get_site_outages: AgentTool = {
 
     const outageFlag = activeOutage ? `⚠ ACTIVE OUTAGE: ${String(activeOutage.outage_summary || '').slice(0, 200)}` : '';
 
-    const llmText = clampString(
-      `Outages for USID ${usid} (${startDate}–${endDate}): ${outageRows.length} cell-outage events\n` +
-      (outageFlag ? outageFlag + '\n' : '') +
-      tableRows.slice(0, 20).map((r) => `• ${r.Date} ${r.Cell}: ${r.Metric} at ${r.Hour}`).join('\n'),
-    );
+    // Headline only — full event list is in the compact_table uiBlock.
+    const llmText = `Outages for USID ${usid} (${startDate}–${endDate}): ${outageRows.length} cell-outage event${outageRows.length !== 1 ? 's' : ''}.${outageFlag ? ' ' + outageFlag : ''} Details shown in card above.`;
 
     const result: ToolResult = { llmText };
     if (tableRows.length) {
@@ -1872,10 +2346,8 @@ const tool_get_neighbor_outages: AgentTool = {
     }
 
     const totalHoPct = impacted.reduce((s, r) => s + parseFloat(r['HO %']), 0);
-    const llmText = clampString(
-      `${impacted.length} of ${neighborRows.length} neighbors have outages on ${dateId} — affecting ${totalHoPct.toFixed(1)}% of ${usid}'s handover traffic.\n` +
-      impacted.map((r) => `• USID ${r['Neighbor USID']} (Rank ${r['HO Rank']}, ${r['HO %']} HO): cells down: ${r['Outage Cells']}`).join('\n'),
-    );
+    // Headline only — impacted neighbor table is in the compact_table uiBlock.
+    const llmText = `${impacted.length} of ${neighborRows.length} neighbors have outages on ${dateId}, affecting ${totalHoPct.toFixed(1)}% of ${usid}'s handover traffic. Details shown in card above.`;
 
     return {
       llmText,
@@ -1917,7 +2389,34 @@ const tool_get_hourly_trends: AgentTool = {
     const usid = sanitizeSiteId(String(args.usid || '').trim());
     if (!usid) return { llmText: 'usid is required.' };
 
-    const rawKpis = sanitizeKpiList(args.kpiNames, ['DL_DRB_TPUT', 'HOSR', 'DATA_RAN_ACC'], 8);
+    const requestedKpis = sanitizeKpiList(args.kpiNames, ['DL_DRB_TPUT', 'HOSR', 'DATA_RAN_ACC'], 8);
+
+    // A1 — pre-flight KPI validation against live schema + DataDict
+    const validatedKpis: string[] = [];
+    for (const k of requestedKpis) {
+      const res = validateKpiName(k);
+      if (res.kind === 'ok') {
+        validatedKpis.push(res.resolved);
+      } else if (res.kind === 'clarify') {
+        logger.info(`[tool:get_hourly_trends] KPI "${k}" needs clarification`);
+        return {
+          llmText:
+            `The KPI "${k}" doesn't match anything in the live schema. ` +
+            `Closest matches: ${res.candidates.map((c) => `${c.label} (${Math.round(c.confidence * 100)}%)`).join(', ')}. ` +
+            `Asked the user to pick one.`,
+          uiBlock: buildKpiClarifyChips(k, res.candidates, `hourly trends for ${k} on USID ${usid}`),
+        };
+      } else {
+        logger.info(`[tool:get_hourly_trends] KPI "${k}" unknown — emitting callout`);
+        return {
+          llmText:
+            `Cannot load hourly trends: KPI "${k}" does not exist in the database and has no close match. ` +
+            `Try a real KPI name like DL_DRB_TPUT, DATA_RAN_ACC, HOSR, or DL_PKTLOSS_RT.`,
+          uiBlock: buildKpiUnknownCallout(k),
+        };
+      }
+    }
+    const rawKpis = validatedKpis;
     const kpiList = rawKpis.map((k) => `'${k}'`).join(',');
 
     const range = clampDateRange(
@@ -2007,15 +2506,8 @@ const tool_get_hourly_trends: AgentTool = {
         (anomalyHours.length > 8 ? ` … +${anomalyHours.length - 8} more` : '')
       : 'No anomaly hours flagged.';
 
-    const llmText = clampString(
-      `Loaded hourly KPI dashboard for USID ${usid} (${startDate}–${endDate}, KPIs: ${rawKpis.join(', ')}).\n` +
-        `Cells: ${cells.length} | data points: ${rows.length}\n` +
-        anomalyText + '\n' +
-        statItems
-          .map((s) => `• ${s.label}: avg ${s.avg.toFixed(1)} | peak ${s.peak.toFixed(1)} | min ${s.min.toFixed(1)} (${primaryKpi})`)
-          .join('\n') +
-        (narrative ? `\n\nAnalysis:\n${narrative}` : ''),
-    );
+    // Headline only — the kpi_dashboard uiBlock shows all trends interactively.
+    const llmText = `Hourly KPI dashboard for USID ${usid} (${startDate}–${endDate}): ${cells.length} cell${cells.length !== 1 ? 's' : ''}, ${rows.length} data points. ${anomalyText} Details shown in card above.`;
 
     // Convert the requested day-range into a valid hourly window (24/48/72h).
     // The kpi_dashboard daysBack field is HOURS when timeframe='hourly'.
@@ -2134,11 +2626,8 @@ const tool_get_kpi_impact_breakdown: AgentTool = {
         `ACC=${Number(cqx.DATA_ACC_IMP||0).toFixed(3)} QUALITY=${Number(cqx.QUALITY_IMP||0).toFixed(3)}`
       : '';
 
-    const llmText = clampString(
-      `KPI impact breakdown for USID ${usid} on ${found.dateId}:\n` +
-      (cqxSummary ? cqxSummary + '\n' : '') +
-      subRows.slice(0, 10).map((r: any) => `• ${r.subcomponent_name}: ${Number(r.subcomponent_value||0).toFixed(4)}${r.anomaly_flag ? ' ⚠' : ''}`).join('\n'),
-    );
+    // Headline only — severity meter with all sub-components is in the uiBlock.
+    const llmText = `KPI impact breakdown for USID ${usid} on ${found.dateId}: ${total ? `total CQX impact ${total.value.toFixed(3)}${total.wow != null ? ` (WoW ${total.wow.toFixed(3)})` : ''}` : 'no total impact data'}. ${subRows.length} sub-components shown in card above.`;
 
     return {
       llmText,
@@ -2233,10 +2722,8 @@ const tool_get_ticket_history: AgentTool = {
       Department: String(r.ASSIGNED_DEPARTMENT || '—'),
     }));
 
-    const llmText = clampString(
-      `Tickets for USID ${usid} (${startDate} → ${endDate}): ${rows.length} total (${open} open)\n` +
-      tableRows.slice(0, 10).map((r) => `• [${r.Status}] ${r.Created} ${r.Category}/${r.Subcategory}: ${r.Description}`).join('\n'),
-    );
+    // Headline only — full ticket list is in the compact_table uiBlock.
+    const llmText = `Tickets for USID ${usid} (${startDate} → ${endDate}): ${rows.length} total, ${open} open. Details shown in card above.`;
 
     return {
       llmText,
@@ -2363,11 +2850,8 @@ const tool_compare_with_cluster: AgentTool = {
       ? `USID ${usid} ranks ${rank}/${peerRows.length} in cluster ${clusterId} for ${kpiName} (${pct}th percentile)${isOutlier ? ' — OUTLIER (>2σ below mean)' : ''}.`
       : `USID ${usid} not found in cluster ${clusterId} KPI data for ${dateId}.`;
 
-    const llmText = clampString(
-      `${rankNote}\n` +
-      `Cluster avg: ${mean.toFixed(2)} | std: ${std.toFixed(2)} | source site: ${sourceVal?.toFixed(2) ?? '—'}\n` +
-      tableRows.map((r) => `  ${r.Rank}. ${r.USID} ${r.Site}: ${r[`Avg ${kpiName}`]}${r.Source ? ' ← THIS SITE' : ''}`).join('\n'),
-    );
+    // Headline only — bar chart with all peers is in the insight_chart uiBlock.
+    const llmText = `${rankNote} Cluster avg: ${mean.toFixed(2)}, std: ${std.toFixed(2)}, site value: ${sourceVal?.toFixed(2) ?? '—'}. Chart shown in card above.`;
 
     return {
       llmText,
@@ -2396,11 +2880,237 @@ const tool_compare_with_cluster: AgentTool = {
   },
 };
 
+// ─── Local Events ────────────────────────────────────────────────────────────
+
+const tool_get_local_events: AgentTool = {
+  name: 'get_local_events',
+  description:
+    'Fetch real-world events (concerts, sports, weather alerts, news, holidays) ' +
+    'near a telecom site or lat/lng point. ' +
+    'Use this when the user asks about events near a site, local activities, ' +
+    'event-driven traffic spikes, or "what\'s happening around site X". ' +
+    'Sources: Ticketmaster, SeatGeek, NWS weather alerts, GDELT news, US public holidays.',
+  parameters: {
+    type: 'object',
+    properties: {
+      usid: {
+        type: 'string',
+        description: 'Site USID — the system will resolve its lat/lng automatically.',
+      },
+      lat: {
+        type: 'number',
+        description: 'Latitude (use instead of usid when coordinates are known).',
+      },
+      lng: {
+        type: 'number',
+        description: 'Longitude (use with lat).',
+      },
+      radiusMiles: {
+        type: 'number',
+        description: 'Search radius in miles. Default 5.',
+      },
+      startDate: {
+        type: 'string',
+        description: 'Start of date window, YYYY-MM-DD. Defaults to today.',
+      },
+      endDate: {
+        type: 'string',
+        description: 'End of date window, YYYY-MM-DD. Defaults to today + 7 days.',
+      },
+    },
+    required: [],
+  },
+  async execute(args, _ctx) {
+    const radiusMiles = Number(args.radiusMiles) || 5;
+    const startDate = typeof args.startDate === 'string' ? args.startDate : undefined;
+    const endDate = typeof args.endDate === 'string' ? args.endDate : undefined;
+
+    let lat: number | undefined = typeof args.lat === 'number' ? args.lat : undefined;
+    let lng: number | undefined = typeof args.lng === 'number' ? args.lng : undefined;
+    let locationLabel = lat != null ? `(${lat.toFixed(4)}, ${lng!.toFixed(4)})` : 'unknown';
+
+    // Resolve USID → lat/lng if coordinates not supplied directly
+    if (args.usid && (!isFinite(lat as number) || !isFinite(lng as number))) {
+      const usid = sanitizeSiteId(String(args.usid));
+      try {
+        // Try local mirror first
+        // pgPool is imported at module top-level
+        const localSite = await pgPool.query(
+          `SELECT latitude::float AS "LATITUDE", longitude::float AS "LONGITUDE", site_name
+           FROM mirror.site_table WHERE usid = $1 LIMIT 1`,
+          [usid],
+        ).catch(() => null);
+        if (localSite && localSite.rows[0]?.LATITUDE) {
+          lat = Number(localSite.rows[0].LATITUDE);
+          lng = Number(localSite.rows[0].LONGITUDE);
+          locationLabel = localSite.rows[0].site_name
+            ? `${localSite.rows[0].site_name} (USID ${usid})`
+            : `USID ${usid}`;
+        } else {
+          const rows = (await remoteDb.query(
+            `SELECT TOP 1 LATITUDE, LONGITUDE, site_name FROM site_table WITH (NOLOCK)
+             WHERE USID = '${usid}' ORDER BY DATE_ID DESC`,
+          )) as Array<{ LATITUDE: number; LONGITUDE: number; site_name?: string }>;
+          if (rows[0]) {
+            lat = Number(rows[0].LATITUDE);
+            lng = Number(rows[0].LONGITUDE);
+            locationLabel = rows[0].site_name
+              ? `${rows[0].site_name} (USID ${usid})`
+              : `USID ${usid}`;
+          }
+        }
+      } catch (err) {
+        logger.warn(`[tool:get_local_events] lat/lng lookup failed for ${args.usid}`, err);
+      }
+      if (!isFinite(lat as number) || !isFinite(lng as number)) {
+        return {
+          llmText: `Could not resolve coordinates for USID ${args.usid}. Try providing lat/lng directly.`,
+        };
+      }
+    }
+
+    if (!isFinite(lat as number) || !isFinite(lng as number)) {
+      return { llmText: 'Please provide a usid or lat/lng coordinates.' };
+    }
+
+    const events = await findLocalEvents({
+      lat: lat as number,
+      lng: lng as number,
+      radiusMiles,
+      startDate,
+      endDate,
+    });
+
+    if (!events.length) {
+      const window = startDate && endDate ? ` between ${startDate} and ${endDate}` : '';
+      return {
+        llmText: `No events found within ${radiusMiles} miles of ${locationLabel}${window}. ` +
+          `This may mean the area is quiet, or upstream APIs (Ticketmaster, SeatGeek) ` +
+          `returned no results for this date range.`,
+      };
+    }
+
+    // Group by category for the summary
+    const byCat: Record<string, number> = {};
+    for (const e of events) byCat[e.category] = (byCat[e.category] ?? 0) + 1;
+    const catSummary = Object.entries(byCat)
+      .sort((a, b) => b[1] - a[1])
+      .map(([cat, n]) => `${n} ${cat}`)
+      .join(', ');
+
+    const rows = events.slice(0, 50).map((e) => ({
+      Date: e.startsAt.slice(0, 10),
+      Time: e.startsAt.slice(11, 16) || '—',
+      Category: e.category,
+      Title: e.title,
+      Venue: e.venueName ?? '—',
+      Distance: e.distanceMiles != null ? `${e.distanceMiles.toFixed(1)} mi` : '—',
+      Attendance: e.attendance ? e.attendance.toLocaleString() : '—',
+      Source: e.source,
+      URL: e.url ?? '',
+    }));
+
+    const llmText =
+      `Found ${events.length} events within ${radiusMiles} miles of ${locationLabel} ` +
+      `(${catSummary}).\n\n` +
+      events.slice(0, 20).map((e) =>
+        `• [${e.category.toUpperCase()}] ${e.startsAt.slice(0, 10)} — ${e.title}` +
+        (e.venueName ? ` @ ${e.venueName}` : '') +
+        (e.attendance ? ` (~${e.attendance.toLocaleString()} attendees)` : '') +
+        (e.distanceMiles != null ? ` · ${e.distanceMiles.toFixed(1)} mi away` : ''),
+      ).join('\n') +
+      (events.length > 20 ? `\n…and ${events.length - 20} more.` : '');
+
+    return {
+      llmText,
+      uiBlock: {
+        type: 'data_table' as const,
+        title: `Events near ${locationLabel} (${radiusMiles} mi radius)`,
+        data: {
+          columns: ['Date', 'Time', 'Category', 'Title', 'Venue', 'Distance', 'Attendance', 'Source'],
+          rows: rows.map((r) => [r.Date, r.Time, r.Category, r.Title, r.Venue, r.Distance, r.Attendance, r.Source]),
+          totalCount: events.length,
+          radiusMiles,
+          location: locationLabel,
+        },
+      },
+    };
+  },
+};
+
+// ─── Clarification tool ──────────────────────────────────────────────────────
+
+const tool_ask_clarification: AgentTool = {
+  name: 'ask_clarification',
+  description:
+    'Ask the user a clarifying question before proceeding. Use when the request is ambiguous: ' +
+    'the site ID is missing, the date range is unclear, or there are multiple valid interpretations. ' +
+    'Provide 2–4 suggested options when possible so the user can answer with one click. ' +
+    'Do NOT use this for simple requests where you can make a reasonable assumption.',
+  parameters: {
+    type: 'object',
+    properties: {
+      question: {
+        type: 'string',
+        description: 'The clarifying question to present to the user.',
+      },
+      options: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Suggested answer options (2–4). Omit for free-text answers.',
+      },
+      kind: {
+        type: 'string',
+        enum: ['radio', 'checkbox', 'text', 'skip'],
+        description:
+          '"radio" = pick one option (default), "checkbox" = pick multiple, ' +
+          '"text" = free-text input, "skip" = only a skip button shown.',
+      },
+    },
+    required: ['question'],
+  },
+  async execute(args, ctx) {
+    const question = String(args.question || 'Please clarify your request.');
+    const options = Array.isArray(args.options)
+      ? (args.options as string[]).map(String).slice(0, 6)
+      : undefined;
+    const kind = (['radio', 'checkbox', 'text', 'skip'] as const).includes(args.kind as any)
+      ? (args.kind as 'radio' | 'checkbox' | 'text' | 'skip')
+      : 'radio';
+
+    // Generate a stable ID for this clarification request.
+    const { randomUUID } = await import('crypto');
+    const id = randomUUID();
+
+    // Emit the clarification event so the frontend can show ClarificationCard.
+    ctx.onEvent?.({
+      type: 'clarification',
+      id,
+      question,
+      options,
+      kind,
+    });
+
+    // Suspend until the user answers (or times out after 5 min).
+    let answer: string;
+    try {
+      answer = await registerClarification(id, question);
+    } catch {
+      return { llmText: 'The clarification request timed out. Please try again.' };
+    }
+
+    return {
+      llmText: `User answered: "${answer}". Continue with this context.`,
+    };
+  },
+};
+
 // ─── Registry ───────────────────────────────────────────────────────────────
 export const ALL_TOOLS: AgentTool[] = [
   tool_find_site,
   tool_get_worst_offenders,
   tool_get_site_rca,
+  tool_run_rca_live,
   tool_get_site_kpis,
   tool_show_kpi_dashboard,
   tool_query_data,
@@ -2420,15 +3130,19 @@ export const ALL_TOOLS: AgentTool[] = [
   tool_get_kpi_impact_breakdown,
   tool_get_ticket_history,
   tool_compare_with_cluster,
+  tool_get_local_events,
+  tool_ask_clarification,
 ];
 
 export const TOOLS_BY_NAME: Record<string, AgentTool> = Object.fromEntries(
   ALL_TOOLS.map((t) => [t.name, t]),
 );
 
-/** Convert the registry into the OpenAI tools API format. */
-export function toOpenAITools() {
-  return ALL_TOOLS.map((t) => ({
+/** Convert a tool set into the OpenAI tools API format. When no list is
+ * provided, advertises only the native tools — callers that want to mix in
+ * MCP / A2A tools should pass the union themselves. */
+export function toOpenAITools(tools: AgentTool[] = ALL_TOOLS) {
+  return tools.map((t) => ({
     type: 'function' as const,
     function: {
       name: t.name,

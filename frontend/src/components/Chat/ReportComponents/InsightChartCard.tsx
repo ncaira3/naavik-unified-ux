@@ -14,7 +14,7 @@
  *     echartsOption: EChartsOption  // full ECharts option object
  *   }
  */
-import { useMemo, useRef, useCallback, useEffect } from 'react';
+import { useMemo, useRef, useCallback, useEffect, useState } from 'react';
 import ReactECharts from 'echarts-for-react';
 import { useTheme } from '../../../context/ThemeContext';
 
@@ -226,23 +226,126 @@ export default function InsightChartCard({ data }: InsightChartCardProps) {
         )}
       </div>
 
-      {/* Footer — SQL source */}
+      {/* Footer — SQL source (expandable) */}
       {source && (
-        <div className="px-4 py-2 border-t flex items-center gap-1.5" style={{ borderColor: hdrBdr }}>
-          <svg
-            className="h-3 w-3 shrink-0"
-            style={{ color: sourceColor }}
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.5"
+        <SqlSource source={source} sourceColor={sourceColor} borderColor={hdrBdr} isDark={isDark} />
+      )}
+    </div>
+  );
+}
+
+// ─── Expandable SQL source footer ───────────────────────────────────────────
+function SqlSource({
+  source,
+  sourceColor,
+  borderColor,
+  isDark,
+}: {
+  source: string;
+  sourceColor: string;
+  borderColor: string;
+  isDark: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const codeBg = isDark ? 'rgba(15,15,18,0.75)' : 'rgba(248,250,252,0.92)';
+  const codeText = isDark ? '#e2e8f0' : '#0f172a';
+  const hoverBg = isDark ? 'rgba(255,255,255,0.03)' : 'rgba(15,23,42,0.03)';
+
+  const copy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(source);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* noop */
+    }
+  };
+
+  return (
+    <div className="border-t" style={{ borderColor }}>
+      {/* Header / toggle row */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="w-full px-4 py-2 flex items-center gap-1.5 text-left transition-colors"
+        style={{ color: sourceColor }}
+        onMouseEnter={(e) => (e.currentTarget.style.background = hoverBg)}
+        onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+        aria-expanded={expanded}
+        aria-label={expanded ? 'Hide SQL query' : 'Show full SQL query'}
+        title={expanded ? 'Hide SQL' : 'Show full SQL'}
+      >
+        <svg
+          className="h-3 w-3 shrink-0"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        >
+          <circle cx="8" cy="8" r="6" />
+          <path d="M8 7v5M8 5.5v.5" strokeLinecap="round" />
+        </svg>
+        <span
+          className={`text-[10px] font-mono min-w-0 flex-1 ${expanded ? '' : 'truncate'}`}
+        >
+          {expanded ? 'SQL query' : source}
+        </span>
+        <svg
+          className={`h-3 w-3 shrink-0 transition-transform duration-150 ${expanded ? 'rotate-180' : ''}`}
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+        >
+          <path d="M4 6l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {/* Expanded body */}
+      {expanded && (
+        <div className="px-4 pb-3">
+          <div
+            className="relative rounded-md border"
+            style={{ background: codeBg, borderColor }}
           >
-            <circle cx="8" cy="8" r="6" />
-            <path d="M8 7v5M8 5.5v.5" strokeLinecap="round" />
-          </svg>
-          <span className="text-[10px] font-mono truncate" style={{ color: sourceColor }}>
-            {source}
-          </span>
+            <button
+              type="button"
+              onClick={copy}
+              className="absolute right-1.5 top-1.5 z-10 flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] font-medium transition-colors"
+              style={{
+                background: isDark ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.85)',
+                borderColor,
+                color: copied ? '#22c55e' : sourceColor,
+              }}
+              title="Copy SQL"
+            >
+              {copied ? (
+                <>
+                  <svg className="h-2.5 w-2.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M3 8l3 3 7-7" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  <span>Copied</span>
+                </>
+              ) : (
+                <>
+                  <svg className="h-2.5 w-2.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <rect x="5" y="5" width="9" height="9" rx="1.5" />
+                    <path d="M3 11V3a1 1 0 011-1h8" />
+                  </svg>
+                  <span>Copy</span>
+                </>
+              )}
+            </button>
+            <pre
+              className="font-mono text-[11px] leading-[1.55] whitespace-pre-wrap break-words m-0 px-3 py-2.5 pr-16 max-h-[280px] overflow-y-auto scrollbar-thin"
+              style={{ color: codeText }}
+            >
+              {source}
+            </pre>
+          </div>
         </div>
       )}
     </div>

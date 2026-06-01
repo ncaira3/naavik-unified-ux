@@ -16,6 +16,7 @@ import {
   Zap,
   Code2,
   MapPin,
+  BookOpen,
   LucideIcon,
 } from 'lucide-react';
 import api from '../services/api';
@@ -43,6 +44,8 @@ const ICON_MAP: Record<string, LucideIcon> = {
   Settings,
   MessageCircle,
   Sparkles,
+  Code2,
+  BookOpen,
 };
 
 /** Enough for logo + expand control on one row (Claude-style) */

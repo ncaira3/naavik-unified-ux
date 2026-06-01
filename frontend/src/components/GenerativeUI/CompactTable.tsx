@@ -81,7 +81,15 @@ export default function CompactTable({
   const text = isDark ? '#FBFBFB' : '#2D2A26';
   const textMuted = isDark ? '#8C8C8C' : '#8F8B85';
   const textSecondary = isDark ? '#B3B3B3' : '#6B6762';
-  const headerBg = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)';
+  // Card-title strip — translucent is fine here, content never scrolls behind it.
+  const titleBarBg = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.025)';
+  // Sticky <thead> background MUST be opaque or body rows bleed through when
+  // the user scrolls. Use a solid colour matched to the chat surface and
+  // layer the subtle tint via a tiny shadow below.
+  const headerBg = isDark ? '#1f1f23' : '#f8f5ef';
+  const headerShadow = isDark
+    ? '0 1px 0 rgba(255,255,255,0.04), 0 2px 6px rgba(0,0,0,0.35)'
+    : '0 1px 0 rgba(45,42,38,0.06), 0 2px 6px rgba(45,42,38,0.06)';
   const rowAltBg = isDark ? 'rgba(255,255,255,0.015)' : 'rgba(0,0,0,0.01)';
   const accent = isDark ? '#a5b4fc' : '#4f46e5';
   const danger = isDark ? '#fca5a5' : '#dc2626';
@@ -145,7 +153,7 @@ export default function CompactTable({
       {(title || subtitle) && (
         <div
           className="px-3 py-2 border-b flex items-baseline justify-between gap-2"
-          style={{ borderColor: border, background: headerBg }}
+          style={{ borderColor: border, background: titleBarBg }}
         >
           {title && (
             <div className="text-[10px] font-bold uppercase tracking-[0.14em]" style={{ color: textSecondary }}>
@@ -161,7 +169,7 @@ export default function CompactTable({
 
       <div className="overflow-auto" style={{ maxHeight }}>
         <table className="w-full border-collapse text-[12px]">
-          <thead className="sticky top-0 z-10" style={{ background: headerBg }}>
+          <thead className="sticky top-0 z-10">
             <tr>
               {columns.map((col) => {
                 const t = detectedTypes[col] || 'text';
@@ -170,7 +178,19 @@ export default function CompactTable({
                   <th
                     key={col}
                     className="px-3 py-2 font-semibold text-[10px] uppercase tracking-[0.10em] whitespace-nowrap"
-                    style={{ color: textMuted, textAlign: align, borderBottom: `1px solid ${border}` }}
+                    style={{
+                      color: textMuted,
+                      textAlign: align,
+                      // Opaque background lives on each <th> so the sticky
+                      // header masks rows beneath it during scroll. The
+                      // shared <thead> bg can be ignored by some renderers,
+                      // so we set it per-cell to be safe.
+                      background: headerBg,
+                      // Hard divider at the bottom plus a soft shadow that
+                      // only shows when content scrolls under the header.
+                      borderBottom: `1px solid ${border}`,
+                      boxShadow: headerShadow,
+                    }}
                   >
                     {col}
                   </th>

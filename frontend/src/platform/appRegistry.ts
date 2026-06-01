@@ -7,6 +7,7 @@ const INTERNAL_LOADERS: Record<string, () => Promise<{ default: React.ComponentT
   observe:     () => import('../components/ObserveView'),
   appgen:      () => import('../components/AppGen/AppGenWrapper'),
   provision:   () => import('../components/ProvisioningView'),
+  docs:        () => import('../components/Docs/DocsView'),
   settings:    () => import('../components/SettingsPageView'),
 };
 
@@ -66,10 +67,22 @@ export const DEFAULT_REGISTRY: AppRegistryEntry[] = [
     navSemanticPatterns: ['change a parameter', 'provision', 'update settings'],
   },
   {
+    id: 'docs',
+    displayName: 'Docs',
+    iconName: 'BookOpen',
+    order: 5,
+    containerType: 'internal',
+    internalKey: 'docs',
+    chatStream: 'universal',
+    isActive: true,
+    navAliases: ['docs', 'documentation', 'help', 'reference', 'guide'],
+    navSemanticPatterns: ['open documentation', 'show docs', 'help me', 'where is the manual'],
+  },
+  {
     id: 'settings',
     displayName: 'Settings',
     iconName: 'Settings',
-    order: 5,
+    order: 6,
     containerType: 'internal',
     internalKey: 'settings',
     chatStream: 'universal',

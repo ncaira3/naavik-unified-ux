@@ -13,7 +13,8 @@ import { MIRROR_SCHEMA } from '../mirror-tables.js';
 import { quoteIdent } from './schema-discovery.js';
 import type { MappedColumn, SyncResult } from './types.js';
 
-const remoteDb = new NaavikDBConnector();
+// Mirror sync needs more time than interactive agent queries — use 30 s.
+const remoteDb = new NaavikDBConnector(undefined, 30_000);
 const REMOTE_INSERT_BATCH = 500;
 
 /** Concurrent remote chunks per heavy table. Keeps remote DB load reasonable. */

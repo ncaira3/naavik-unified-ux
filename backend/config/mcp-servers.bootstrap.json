@@ -1,0 +1,58 @@
+[
+  {
+    "name": "demo-filesystem",
+    "description": "Read/write files inside a sandboxed demo workspace. Try: 'List the files in the demo workspace' or 'Show me the runbook for coverage degradation'.",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-filesystem",
+      "./data/mcp-demo-workspace"
+    ],
+    "enabled": true
+  },
+  {
+    "name": "demo-fetch",
+    "description": "Fetch arbitrary public HTTP/HTTPS URLs and return the content. Useful for pulling vendor docs, 3GPP specs, or news during an incident.",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-fetch"
+    ],
+    "enabled": true
+  },
+  {
+    "name": "demo-memory",
+    "description": "Persistent key/value memory across chat sessions. Try: 'Remember that USID 9787 has a known tilt issue from last quarter' — then in a new session, 'What do you know about USID 9787?'",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-memory"
+    ],
+    "enabled": true
+  },
+  {
+    "name": "demo-sequential-thinking",
+    "description": "Lets the agent break a hard problem into explicit, revisable thinking steps. Good for showing reasoning during deep RCA investigations.",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-sequential-thinking"
+    ],
+    "enabled": true
+  },
+  {
+    "name": "demo-everything",
+    "description": "Anthropic's official reference MCP server. Exposes test tools, sample resources, and prompts — perfect for proving discovery works without any real-world side effects.",
+    "transport": "stdio",
+    "command": "npx",
+    "args": [
+      "-y",
+      "@modelcontextprotocol/server-everything"
+    ],
+    "enabled": false
+  }
+]

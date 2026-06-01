@@ -6,6 +6,9 @@ import apiWithCache from '../services/apiWithCache';
 import { AppGenAgentChatResponse, ChatMessage, type ChatAttachment } from '../types';
 import ChatMessageComponent from './ChatMessage';
 import TypingIndicator from './TypingIndicator';
+import AgentActivityCard from './Chat/AgentActivityCard';
+import ClarificationCard from './Chat/ClarificationCard';
+import { useAgentStream } from '../hooks/useAgentStream';
 import { useChat, type ChatStream } from '../context/ChatContext';
 import { useMapData } from '../context/MapDataContext';
 import { useDummifier } from '../context/DummifierContext';
@@ -84,6 +87,43 @@ const INTRO_FUTURE_STEPS = [
 
 const OSS_PARAMETER_INTENT_REGEX =
   /(change|set|update)\s+([a-zA-Z_][a-zA-Z0-9_]*)[\s\S]*?(?:site|on)\s+([a-zA-Z0-9_-]+)[\s\S]*?(?:to|=)\s*(-?\d+(?:\.\d+)?)(?:\s*([a-zA-Z%]+))?/i;
+/**
+ * UI block / visualization types that produce a panel taller than the chat
+ * viewport. When the last assistant message contains one of these we anchor
+ * the scroll on the message's TOP so the user lands at the dashboard header
+ * (filters, USID switcher, KPI picker) and scrolls DOWN into the charts —
+ * instead of being dumped at the very bottom of a long card.
+ */
+const TALL_UI_BLOCK_TYPES = new Set<string>([
+  'kpi_dashboard',
+  'diagnosis_card',
+  'tabs',
+  'grid_layout',
+  'rca_story',
+  'rca_report',
+  'severity_meter',
+  'topology_grid',
+  'recommendation_card',
+]);
+const TALL_VISUALIZATION_TYPES = new Set<string>([
+  'kpi_dashboard',
+  'chat_kpi_dashboard',
+  'rca_story',
+  'tabs',
+  'grid',
+]);
+function isTallAssistantMessage(msg: any): boolean {
+  if (!msg || msg.role !== 'assistant') return false;
+  if (Array.isArray(msg.uiBlocks)) {
+    for (const b of msg.uiBlocks) {
+      if (b && TALL_UI_BLOCK_TYPES.has(b.type)) return true;
+    }
+  }
+  const vt = msg.visualization?.type;
+  if (vt && TALL_VISUALIZATION_TYPES.has(vt)) return true;
+  return false;
+}
+
 function getYesterdayISO(): string {
   const d = new Date();
   d.setDate(d.getDate() - 1);
@@ -542,6 +582,17 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
   const { dashboards: savedDashboardsList } = useSavedDashboards();
   const schemaRef = useRef<string>('');
   const [inputValue, setInputValue] = useState('');
+
+  /** Trim leading/trailing whitespace from pasted text before inserting. */
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    e.preventDefault();
+    const pasted = e.clipboardData.getData('text').trim();
+    const el = e.currentTarget;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    setInputValue((prev) => prev.slice(0, start) + pasted + prev.slice(end));
+  };
+
   const [isLoading, setIsLoading] = useState(false);
   const [latestOffenderDate, setLatestOffenderDate] = useState(WORST_OFFENDERS_DEFAULT_DATE);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -555,11 +606,19 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
   // AbortController for the in-flight agent request. The send button turns
   // into a stop button while a request is running; clicking it aborts.
   const inflightControllerRef = useRef<AbortController | null>(null);
+
+  // SSE streaming hook (V3 streaming endpoint). When the user has SSE enabled
+  // (default: on), we route through this hook instead of api.agentV3Chat for
+  // live tool-call visibility and clarification cards. Stop button cancels
+  // both the legacy AbortController and the SSE stream.
+  const agentStream = useAgentStream();
+
   const handleStopRequest = useCallback(() => {
     inflightControllerRef.current?.abort();
     inflightControllerRef.current = null;
+    agentStream.cancel();
     setIsLoading(false);
-  }, []);
+  }, [agentStream]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const scrollPinnedRef = useRef<boolean>(true);
@@ -841,6 +900,23 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
       }
     });
   };
+
+  // Dispatch streaming uiCommands as they arrive over SSE so the map/KPI panel
+  // updates in real time (rather than only after the assistant message lands).
+  const lastDispatchedStreamCmdLen = useRef(0);
+  useEffect(() => {
+    const cmds = agentStream.uiCommands;
+    if (!cmds || cmds.length <= lastDispatchedStreamCmdLen.current) return;
+    const fresh = cmds.slice(lastDispatchedStreamCmdLen.current) as Array<{ type: string; payload: any }>;
+    lastDispatchedStreamCmdLen.current = cmds.length;
+    applyAgentUiCommands(fresh);
+  }, [agentStream.uiCommands]);
+  // Reset the dispatch cursor when a new stream starts.
+  useEffect(() => {
+    if (agentStream.isStreaming && agentStream.uiCommands.length === 0) {
+      lastDispatchedStreamCmdLen.current = 0;
+    }
+  }, [agentStream.isStreaming, agentStream.uiCommands.length]);
 
   const appendAgentAssistantMessage = (agentResponse: any) => {
     applyAgentUiCommands(agentResponse?.uiCommands);
@@ -1517,15 +1593,56 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
 
   useEffect(() => {
     if (!messages.length) return;
-    // Always scroll to the true bottom when a new message arrives. Two passes:
-    // - an immediate jump so the user sees the assistant chrome appear,
-    // - a deferred smooth pass once heavy visualizations (rca_story/grid) paint.
+    const container = scrollContainerRef.current;
     const lastMessage = messages[messages.length - 1];
-    const isHeavy =
-      lastMessage?.visualization?.type === 'rca_story' ||
-      lastMessage?.visualization?.type === 'grid';
+
+    // When the assistant emits a tall payload (dashboard, diagnosis card,
+    // multi-tab report, grid, long RCA story), anchor the scroll on the TOP
+    // of that message so the header / filters land at the chat viewport top
+    // and the user reads downward.
+    const anchorTall = () => {
+      const el = lastAnswerRef.current;
+      if (!el || !container) return false;
+      const containerRect = container.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const delta = elRect.top - containerRect.top;
+      // Small top inset so the message has a little breathing room above it.
+      const TOP_INSET = 12;
+      container.scrollTo({
+        top: Math.max(0, container.scrollTop + delta - TOP_INSET),
+        behavior: 'auto',
+      });
+      // The user is no longer pinned to the absolute bottom, so the
+      // ResizeObserver below won't override us when the dashboard fetches
+      // data and grows in height.
+      scrollPinnedRef.current = false;
+      return true;
+    };
+
+    if (isTallAssistantMessage(lastMessage)) {
+      // First pass — immediate jump so the dashboard doesn't appear off-screen.
+      const first = anchorTall();
+      // Second pass — after the dashboard's data fetch resolves the card
+      // grows in height; re-anchor so its top stays at the viewport top.
+      const re1 = setTimeout(() => anchorTall(), 200);
+      const re2 = setTimeout(() => anchorTall(), 700);
+      const re3 = setTimeout(() => anchorTall(), 1500);
+      // If the ref wasn't ready yet, retry on the next paint.
+      if (!first) {
+        requestAnimationFrame(() => anchorTall());
+      }
+      return () => {
+        clearTimeout(re1);
+        clearTimeout(re2);
+        clearTimeout(re3);
+      };
+    }
+
+    // Default: scroll to the true bottom for normal/text messages. Two passes:
+    // - an immediate jump so the user sees the assistant chrome appear,
+    // - a deferred smooth pass once any inline media paints.
     scrollToBottom('auto');
-    const delayMs = isHeavy ? 1200 : 120;
+    const delayMs = 120;
     const timer = setTimeout(() => scrollToBottom('smooth'), delayMs);
     return () => clearTimeout(timer);
   }, [messages, isLoading]);
@@ -2108,29 +2225,53 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
       let agentResponse: any;
       if (useV3) {
         const schemaCtx = schemaRef.current ? `\n${schemaRef.current}` : '';
-        // Replace any prior in-flight controller so the stop button always
-        // targets the most recent request.
-        inflightControllerRef.current?.abort();
-        const controller = new AbortController();
-        inflightControllerRef.current = controller;
-        const v3 = await api.agentV3Chat({
-          threadId: sessionId,
-          message: schemaCtx ? `${query}${schemaCtx}` : query,
-          currentView: currentView || 'home',
-          stream,
-        }, { signal: controller.signal });
-        // Clear the ref now that this request landed successfully.
-        if (inflightControllerRef.current === controller) inflightControllerRef.current = null;
-        // Adapt v3 shape → v2 shape so the existing renderer just works.
-        agentResponse = {
-          threadId: v3.threadId,
-          assistantMessage: v3.assistantMessage,
-          intent: 'general',
-          confidence: 1,
-          uiCommands: v3.uiCommands || [],
-          uiBlocks: v3.uiBlocks || [],
-          handled: true,
-        };
+        // SSE streaming path — default ON, disable with localStorage flag
+        //   localStorage.setItem('naavik:use-agent-sse', '0')
+        let useSse = true;
+        try { useSse = localStorage.getItem('naavik:use-agent-sse') !== '0'; } catch { /* SSR */ }
+
+        if (useSse) {
+          // start() accumulates tokens/blocks/commands into local variables
+          // and returns them directly — safe from stale-closure issues.
+          const streamResult = await agentStream.start({
+            threadId: sessionId,
+            message: schemaCtx ? `${query}${schemaCtx}` : query,
+            currentView: currentView || 'home',
+          });
+          const hasVisualBlocks = (streamResult.uiBlocks || []).length > 0;
+          agentResponse = {
+            threadId: sessionId,
+            assistantMessage: streamResult.tokens
+              || (streamResult.error ? `⚠ ${streamResult.error}` : null)
+              || (hasVisualBlocks ? 'Analysis complete — see results below.' : "I completed the analysis but didn't produce a response. Try rephrasing your question."),
+            intent: 'general',
+            confidence: 1,
+            uiCommands: streamResult.uiCommands || [],
+            uiBlocks: streamResult.uiBlocks || [],
+            handled: true,
+          };
+        } else {
+          // Legacy atomic V3 path (no streaming)
+          inflightControllerRef.current?.abort();
+          const controller = new AbortController();
+          inflightControllerRef.current = controller;
+          const v3 = await api.agentV3Chat({
+            threadId: sessionId,
+            message: schemaCtx ? `${query}${schemaCtx}` : query,
+            currentView: currentView || 'home',
+            stream,
+          }, { signal: controller.signal });
+          if (inflightControllerRef.current === controller) inflightControllerRef.current = null;
+          agentResponse = {
+            threadId: v3.threadId,
+            assistantMessage: v3.assistantMessage,
+            intent: 'general',
+            confidence: 1,
+            uiCommands: v3.uiCommands || [],
+            uiBlocks: v3.uiBlocks || [],
+            handled: true,
+          };
+        }
       } else {
         agentResponse = await api.agentV2Chat({
           threadId: sessionId,
@@ -3978,6 +4119,7 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
 	                        ref={inputRef as unknown as React.Ref<HTMLTextAreaElement>}
 	                        value={inputValue}
 	                        onChange={(e) => setInputValue(e.target.value)}
+                        onPaste={handlePaste}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter' && !e.shiftKey) {
                             e.preventDefault();
@@ -4099,6 +4241,7 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
                       ref={inputRef as unknown as React.Ref<HTMLTextAreaElement>}
                       value={inputValue}
                       onChange={(e) => setInputValue(e.target.value)}
+                        onPaste={handlePaste}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' && !e.shiftKey) {
                           e.preventDefault();
@@ -4145,14 +4288,24 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
             <div className="space-y-4 lg:space-y-5">
               {messages.map((message, idx) => {
                 const lastIdx = messages.length - 1;
-                const scrollTargetIdx =
-                  messages[lastIdx]?.role === 'assistant' && lastIdx > 0 && messages[lastIdx - 1]?.role === 'user'
+                const lastMsg = messages[lastIdx];
+                // If the last assistant message renders a tall payload
+                // (dashboard / diagnosis card / multi-tab report / grid /
+                // long RCA story), anchor the SCROLL on that message so the
+                // user lands at its TOP — header + filters first, charts
+                // below as they scroll down. Otherwise fall back to the
+                // existing behaviour (anchor on the user's question above).
+                const lastIsTall = isTallAssistantMessage(lastMsg);
+                const scrollTargetIdx = lastIsTall
+                  ? lastIdx
+                  : (lastMsg?.role === 'assistant' && lastIdx > 0 && messages[lastIdx - 1]?.role === 'user'
                     ? lastIdx - 1
-                    : lastIdx;
+                    : lastIdx);
                 return (
                   <div
                     key={message.id}
                     ref={idx === scrollTargetIdx ? lastAnswerRef : undefined}
+                    data-tall-anchor={idx === scrollTargetIdx && lastIsTall ? 'true' : undefined}
                     style={{ scrollMarginTop: '1rem' }}
                   >
                     <ChatMessageComponent
@@ -4198,8 +4351,28 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
                 );
               })}
               
-              {isLoading && <TypingIndicator />}
-              
+              {/* Live agent activity (SSE) — shows running tool calls.
+                  When SSE is active this REPLACES the legacy TypingIndicator
+                  so we don't double up loading UIs. */}
+              {(agentStream.isStreaming || agentStream.activityItems.length > 0) ? (
+                <AgentActivityCard
+                  items={agentStream.activityItems}
+                  isStreaming={agentStream.isStreaming}
+                  stalled={agentStream.stalled}
+                  progressMessage={agentStream.progressMessage}
+                />
+              ) : (
+                isLoading && <TypingIndicator />
+              )}
+
+              {/* Clarification card — pauses the chat until the user answers. */}
+              {agentStream.clarification && (
+                <ClarificationCard
+                  clarification={agentStream.clarification}
+                  onAnswer={agentStream.answerClarification}
+                />
+              )}
+
               <div ref={messagesEndRef} />
             </div>
           )}
@@ -4302,6 +4475,7 @@ export default function ChatInterface({ onNavigate, currentView }: ChatInterface
 	                ref={inputRef as unknown as React.Ref<HTMLTextAreaElement>}
 	                value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
+                        onPaste={handlePaste}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();

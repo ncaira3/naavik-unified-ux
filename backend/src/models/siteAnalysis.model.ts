@@ -13,7 +13,9 @@ import type {
   TrafficProfileResponse,
 } from '../types/index.js';
 
-const remoteDbConnector = new NaavikDBConnector();
+// Dashboard queries fetch up to 30 days × many KPIs — give them more headroom
+// than the interactive 8 s agent timeout, but still finite so the UI fails fast.
+const remoteDbConnector = new NaavikDBConnector(undefined, 20_000);
 
 function escapeSqlLiteral(value: string): string {
   return String(value).replace(/'/g, "''");
@@ -265,7 +267,7 @@ export class SiteAnalysisModel {
     const endDate = normalizeDate(params.endDate || effectiveDate);
     const startDate = normalizeDate(params.startDate || (() => {
       const start = new Date(endDate);
-      start.setDate(start.getDate() - (viewType === 'hourly' ? 2 : 30));
+      start.setDate(start.getDate() - (viewType === 'hourly' ? 2 : 14));
       return start.toISOString().slice(0, 10);
     })());
     const kpiList = kpiNames.map((kpi) => `'${escapeSqlLiteral(kpi)}'`).join(', ');
@@ -335,28 +337,57 @@ export class SiteAnalysisModel {
         usidList = usidList.concat(neighbors.map((neighbor) => `'${escapeSqlLiteral(neighbor)}'`));
       }
 
-      const query = `
-        SELECT TOP 20000 USID, DATE_ID, HOUR_ID, cell_name, kpi_name, kpi_value
-        FROM hourly_intermediate_kpis_table WITH (NOLOCK)
-        WHERE USID IN (${usidList.join(', ')})
-          AND DATE_ID >= CAST('${escapeSqlLiteral(startDate)}' AS DATETIME)
-          AND DATE_ID <  DATEADD(day, 1, CAST('${escapeSqlLiteral(endDate)}' AS DATETIME))
-          AND kpi_name IN (${kpiList})
-        ORDER BY DATE_ID, HOUR_ID, cell_name, kpi_name
-      `;
-      rows = await remoteDbConnector.query(query) as Record<string, unknown>[];
+      // Mirror-first: local hourly table covers the last 30 days for offender USIDs.
+      const usidValues = usidList.map((u) => u.replace(/^'|'$/g, ''));
+      rows = await mirrorOrRemote({
+        local: {
+          sql: `SELECT usid AS "USID",
+                       to_char(date_id, 'YYYY-MM-DD"T"HH24:MI:SS') AS "DATE_ID",
+                       hour_id AS "HOUR_ID", cell_name, kpi_name, kpi_value
+                FROM mirror.hourly_intermediate_kpis_table
+                WHERE usid = ANY($1::text[])
+                  AND date_id >= $2::date
+                  AND date_id <  ($3::date + INTERVAL '1 day')
+                  AND kpi_name = ANY($4::text[])
+                ORDER BY date_id, hour_id, cell_name, kpi_name
+                LIMIT 20000`,
+          params: [usidValues, startDate, endDate, kpiNames],
+        },
+        remote: `SELECT TOP 20000 USID, DATE_ID, HOUR_ID, cell_name, kpi_name, kpi_value
+                 FROM hourly_intermediate_kpis_table WITH (NOLOCK)
+                 WHERE USID IN (${usidList.join(', ')})
+                   AND DATE_ID >= CAST('${escapeSqlLiteral(startDate)}' AS DATETIME)
+                   AND DATE_ID <  DATEADD(day, 1, CAST('${escapeSqlLiteral(endDate)}' AS DATETIME))
+                   AND kpi_name IN (${kpiList})
+                 ORDER BY DATE_ID, HOUR_ID, cell_name, kpi_name`,
+        tag: 'cell-kpis:hourly',
+      }) as Record<string, unknown>[];
       rows = rows.map((row) => ({ ...row, is_neighbor: String(pickField(row, ['USID', 'usid']) || '') !== realUsid }));
     } else {
-      const query = `
-        SELECT TOP 10000 USID, DATE_ID, cell_name, kpi_name, kpi_value
-        FROM intermediate_kpi_table WITH (NOLOCK)
-        WHERE USID = '${escapeSqlLiteral(realUsid)}'
-          AND DATE_ID >= CAST('${escapeSqlLiteral(startDate)}' AS DATETIME)
-          AND DATE_ID <= CAST('${escapeSqlLiteral(endDate)}' AS DATETIME)
-          AND kpi_name IN (${kpiList})
-        ORDER BY DATE_ID, cell_name, kpi_name
-      `;
-      rows = await remoteDbConnector.query(query) as Record<string, unknown>[];
+      // Mirror-first: local daily table covers the last 30 days for offender USIDs.
+      rows = await mirrorOrRemote({
+        local: {
+          sql: `SELECT usid AS "USID",
+                       to_char(date_id, 'YYYY-MM-DD"T"HH24:MI:SS') AS "DATE_ID",
+                       cell_name, kpi_name, kpi_value
+                FROM mirror.intermediate_kpi_table
+                WHERE usid = $1
+                  AND date_id >= $2::date
+                  AND date_id <= $3::date
+                  AND kpi_name = ANY($4::text[])
+                ORDER BY date_id, cell_name, kpi_name
+                LIMIT 10000`,
+          params: [realUsid, startDate, endDate, kpiNames],
+        },
+        remote: `SELECT TOP 10000 USID, DATE_ID, cell_name, kpi_name, kpi_value
+                 FROM intermediate_kpi_table WITH (NOLOCK)
+                 WHERE USID = '${escapeSqlLiteral(realUsid)}'
+                   AND DATE_ID >= CAST('${escapeSqlLiteral(startDate)}' AS DATETIME)
+                   AND DATE_ID <= CAST('${escapeSqlLiteral(endDate)}' AS DATETIME)
+                   AND kpi_name IN (${kpiList})
+                 ORDER BY DATE_ID, cell_name, kpi_name`,
+        tag: 'cell-kpis:daily',
+      }) as Record<string, unknown>[];
     }
 
     return {

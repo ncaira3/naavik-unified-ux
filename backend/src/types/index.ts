@@ -161,6 +161,16 @@ export interface ValidationResult {
   valid: boolean;
   errors: string[];
   warnings: string[];
+  /** Cost estimate from the query-cost-estimator. Populated by validateSQL. */
+  cost?: {
+    estimatedRows: number;
+    estimatedMs: number;
+    warningLevel: 'green' | 'yellow' | 'red';
+    reasons: string[];
+    suggestions: string[];
+    missingRequiredFilters: string[];
+    tables: string[];
+  };
 }
 
 export interface QueryResult {

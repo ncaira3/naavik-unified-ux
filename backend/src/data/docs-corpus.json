@@ -1,0 +1,690 @@
+[
+  {
+    "pageId": "introduction",
+    "pageTitle": "Introduction",
+    "group": "Getting Started",
+    "sectionId": "what-is-naavik",
+    "sectionTitle": "What is Naavik",
+    "text": "Naavik is an AI-assisted operations platform for radio access network monitoring, root-cause analysis, parameter provisioning, and rApp development. It unifies four workspaces — Observe, AppGen, Provision, and a conversational agent — behind a single authentication and chat layer. The platform reads from a local PostgreSQL mirror of the customer's network data and falls back transparently to the remote MSSQL source for any data not yet mirrored. All AI features are grounded in a live schema reference and an Ericsson EIAP DataDict of approximately 16,000 parameters."
+  },
+  {
+    "pageId": "introduction",
+    "pageTitle": "Introduction",
+    "group": "Getting Started",
+    "sectionId": "product-areas",
+    "sectionTitle": "Product areas",
+    "text": "Naavik Chat is the multi-stream agentic assistant with function-calling tool use, structured diagnoses, and inline UI blocks. Naavik Observe is the interactive site map, KPI dashboards, site detail panel with five tabs, AI Site Analyzer, worst-offender ranking, cluster comparison. Naavik AppGen is the six-stage AI pipeline for rApp generation, including planning, code, audit, tests, integration validation, and packaging. Naavik Provision is the change-request workflow with OSS adapter, simulator, and a status board for in-flight, completed, and failed changes. Knowledge Library is the DataDict-grounded Q&A, fuzzy KPI and parameter resolution, parameter-to-KPI cross-reference."
+  },
+  {
+    "pageId": "introduction",
+    "pageTitle": "Introduction",
+    "group": "Getting Started",
+    "sectionId": "audience",
+    "sectionTitle": "Audience",
+    "text": "This documentation is intended for radio access engineers, automation developers, and platform administrators. Familiarity with LTE and NR KPIs, Ericsson MO and EIAP naming, and basic SQL is assumed."
+  },
+  {
+    "pageId": "quickstart",
+    "pageTitle": "Quickstart",
+    "group": "Getting Started",
+    "sectionId": "log-in",
+    "sectionTitle": "Log in",
+    "text": "Open the application URL and sign in with your username and password. Sessions are persisted for four hours via a JWT stored in localStorage. Reloads do not require re-authentication while the token is valid. Admin credentials are sourced from backend/.env at startup. If the server returns an authentication error on first boot, verify that ADMIN_USERNAME, ADMIN_PASSWORD_HASH, and JWT_SECRET are set."
+  },
+  {
+    "pageId": "quickstart",
+    "pageTitle": "Quickstart",
+    "group": "Getting Started",
+    "sectionId": "pick-a-market",
+    "sectionTitle": "Pick a market",
+    "text": "On first login a modal asks you to select a market. Northern California is available today; additional markets appear as Coming soon pills. The selection persists in localStorage under naavik_market and can be changed later from the user menu."
+  },
+  {
+    "pageId": "quickstart",
+    "pageTitle": "Quickstart",
+    "group": "Getting Started",
+    "sectionId": "set-default-landing",
+    "sectionTitle": "Set your default landing page",
+    "text": "Open Settings then Appearance and choose where each login lands you — Home, Observe, or AppGen. The preference is stored per browser and used by getDefaultLandingPage on app bootstrap."
+  },
+  {
+    "pageId": "quickstart",
+    "pageTitle": "Quickstart",
+    "group": "Getting Started",
+    "sectionId": "run-an-analysis",
+    "sectionTitle": "Run your first analysis",
+    "text": "Navigate to Observe from the left rail. Click any site marker on the map to open the site detail panel. Open the AI Analyzer tab to run a deep investigation. Alternatively, open Home and type 'analyse site 9787' in the chat composer. The agent runs the site analysis tool suite in parallel, returns a diagnosis card, and stacks supporting evidence beneath it."
+  },
+  {
+    "pageId": "authentication",
+    "pageTitle": "Authentication",
+    "group": "Getting Started",
+    "sectionId": "login-flow",
+    "sectionTitle": "Login flow",
+    "text": "The login form posts username and password to /api/auth/login. The backend validates the password against a bcrypt hash stored in backend/.env. On success the response includes a JWT signed with JWT_SECRET and a 24-hour expiry. The token is stored in localStorage as naavik_token."
+  },
+  {
+    "pageId": "authentication",
+    "pageTitle": "Authentication",
+    "group": "Getting Started",
+    "sectionId": "session-lifetime",
+    "sectionTitle": "Session lifetime",
+    "text": "On every reload, AppBootstrap calls /api/auth/verify with the existing token. Valid tokens silently re-hydrate the user; invalid or expired tokens return the user to the login page. The verify endpoint is the single source of truth for client-side session state."
+  },
+  {
+    "pageId": "authentication",
+    "pageTitle": "Authentication",
+    "group": "Getting Started",
+    "sectionId": "permissions",
+    "sectionTitle": "Per-user app permissions",
+    "text": "Each app in the platform registry has an optional permission key. The useAuth context exposes a permission map keyed by app id. Hidden apps do not appear in the left rail. Admins manage permissions from Settings then App Permissions."
+  },
+  {
+    "pageId": "authentication",
+    "pageTitle": "Authentication",
+    "group": "Getting Started",
+    "sectionId": "logout",
+    "sectionTitle": "Logout",
+    "text": "Logging out from the profile menu clears the token from localStorage and reloads the page. There is no server-side session state to invalidate."
+  },
+  {
+    "pageId": "markets",
+    "pageTitle": "Markets",
+    "group": "Getting Started",
+    "sectionId": "overview",
+    "sectionTitle": "Markets overview",
+    "text": "A market is a named collection of raw MARKET values from site_table. Selecting a market filters the map, dashboards, and site lists to sites whose raw market falls inside the configured set. The mapping lives in frontend/src/config/markets.ts."
+  },
+  {
+    "pageId": "markets",
+    "pageTitle": "Markets",
+    "group": "Getting Started",
+    "sectionId": "available-markets",
+    "sectionTitle": "Available markets",
+    "text": "Northern California is available today and maps to raw MARKET value NORCAL. Southern California, Pacific Northwest, Texas, and Northeast are coming soon."
+  },
+  {
+    "pageId": "markets",
+    "pageTitle": "Markets",
+    "group": "Getting Started",
+    "sectionId": "switching",
+    "sectionTitle": "Switching markets",
+    "text": "Open the profile menu and click Market. The modal lets you switch without reloading. The new selection is written to localStorage and read by every market-aware component on its next render."
+  },
+  {
+    "pageId": "platform-overview",
+    "pageTitle": "Platform overview",
+    "group": "Platform",
+    "sectionId": "sidebar",
+    "sectionTitle": "Left sidebar",
+    "text": "The left rail collapses to a 68-pixel icon strip and expands to 248 pixels with full labels. It contains the workspace switcher, per-stream session history, and the profile menu. Tooltips render through a portal so they are never clipped by overflow containers. Workspaces include Home, Observe, AppGen, Provision, Documentation. Session history shows per-stream prompts that you can click to resend. The profile menu has Market, Settings, Feedback, Log out."
+  },
+  {
+    "pageId": "platform-overview",
+    "pageTitle": "Platform overview",
+    "group": "Platform",
+    "sectionId": "app-registry",
+    "sectionTitle": "App registry",
+    "text": "The registry lists every mountable app and its display name, icon, route, default chat stream, and required permission. The default registry is defined in frontend/src/platform/appRegistry.ts. At runtime, useAppRegistry fetches the live registry from /platform/registry and falls back to the default if the fetch fails."
+  },
+  {
+    "pageId": "platform-overview",
+    "pageTitle": "Platform overview",
+    "group": "Platform",
+    "sectionId": "platform-bus",
+    "sectionTitle": "Platform bus",
+    "text": "A lightweight publish/subscribe bus that lets any component request a navigation without prop-drilling. Chat, AppGen, and Provision all publish NAVIGATE_TO_APP events; the shell subscribes and routes the user to the requested workspace."
+  },
+  {
+    "pageId": "platform-overview",
+    "pageTitle": "Platform overview",
+    "group": "Platform",
+    "sectionId": "theme",
+    "sectionTitle": "Theme",
+    "text": "The ThemeProvider exposes theme and setTheme with values light, dark, or auto. Auto follows the user's operating system preference. Selection is persisted in localStorage."
+  },
+  {
+    "pageId": "chat",
+    "pageTitle": "Conversational agent",
+    "group": "Conversational Agent",
+    "sectionId": "streams",
+    "sectionTitle": "Chat streams",
+    "text": "Each workspace has a default stream that re-frames the agent's tool list, system prompt, and starter suggestions. Streams can be switched manually from the chat header. The five streams are: universal (cross-module assistant, default for Home), observability (network monitoring and site analysis, default for Observe), appgen (rApp creation and code generation, default for AppGen), provision (parameter changes and OSS orchestration, default for Provision), and knowledge (telecom domain knowledge and DataDict lookup)."
+  },
+  {
+    "pageId": "chat",
+    "pageTitle": "Conversational agent",
+    "group": "Conversational Agent",
+    "sectionId": "agent-v3",
+    "sectionTitle": "Agent V3 orchestrator",
+    "text": "The V3 orchestrator is a true OpenAI function-calling tool-use loop. On every turn it advertises the registered tools, lets the model pick which to invoke, executes the chosen tool calls in parallel via Promise.allSettled, and feeds the results back as tool messages for the next iteration. Default model is gpt-4o-mini. Maximum iterations is MAX_ITERATIONS=8. Cancellation flows through an AbortController."
+  },
+  {
+    "pageId": "chat",
+    "pageTitle": "Conversational agent",
+    "group": "Conversational Agent",
+    "sectionId": "tools",
+    "sectionTitle": "Tool registry",
+    "text": "Twenty-one tools are registered, split into three families. Generic tools: find_site, navigate_to, set_map_layer, get_worst_offenders, get_site_rca, get_site_kpis, show_kpi_dashboard, query_data, generate_report, get_telecom_knowledge, resolve_kpi_param. Deep site-analysis tools: get_site_topology, get_config_changes, get_neighbor_relations, get_neighbor_outages, get_ret_changes, get_site_outages, get_hourly_trends, get_kpi_impact_breakdown, get_ticket_history, compare_with_cluster. All site-analysis tools accept a USID and a date or date range, and read from the local mirror first."
+  },
+  {
+    "pageId": "chat",
+    "pageTitle": "Conversational agent",
+    "group": "Conversational Agent",
+    "sectionId": "structured-synthesis",
+    "sectionTitle": "Structured synthesis",
+    "text": "When the user asks the agent to investigate or analyse a site, the system prompt instructs the model to produce a six-section markdown synthesis: Severity, Headline, What Changed, What Degraded, Likely Root Cause, Next Actions. The orchestrator detects this format and replaces the chat bubble text with the headline, emitting a diagnosis_card UI block instead so the same content is not shown twice."
+  },
+  {
+    "pageId": "chat",
+    "pageTitle": "Conversational agent",
+    "group": "Conversational Agent",
+    "sectionId": "stop-button",
+    "sectionTitle": "Stop button",
+    "text": "While a request is in flight the Send button morphs into an animated Stop button. Clicking it aborts the in-flight call via the shared AbortController and posts a system note 'Request stopped'. The input is freed immediately for a new query."
+  },
+  {
+    "pageId": "chat",
+    "pageTitle": "Conversational agent",
+    "group": "Conversational Agent",
+    "sectionId": "attachments",
+    "sectionTitle": "Attachments",
+    "text": "The composer accepts up to three attachments per message — CSV files up to 750 KB, images up to 900 KB, or plain text up to 120 KB. Attachments are sent inline in the chat payload."
+  },
+  {
+    "pageId": "chat",
+    "pageTitle": "Conversational agent",
+    "group": "Conversational Agent",
+    "sectionId": "session-history",
+    "sectionTitle": "Session history",
+    "text": "Recent user prompts are grouped per stream in the expanded sidebar. Click any prompt to re-send it. History is local to the React state and resets on logout."
+  },
+  {
+    "pageId": "agent-guardrails",
+    "pageTitle": "Agent guardrails",
+    "group": "Conversational Agent",
+    "sectionId": "kpi-validation",
+    "sectionTitle": "KPI name validation",
+    "text": "Before any data-fetching tool reaches the database, the requested KPI name is validated against the live schema reference and the DataDict catalog. The validator returns one of three outcomes: ok (exact or high-confidence fuzzy match), clarify (multiple candidates — return a chip selector and wait for the user to pick), or unknown (return a callout explaining that the KPI does not exist, with example real names). This guardrail prevents the agent from fabricating charts for KPIs that do not exist. Similarity is computed as a weighted blend of token-overlap and edit distance against normalized KPI names."
+  },
+  {
+    "pageId": "agent-guardrails",
+    "pageTitle": "Agent guardrails",
+    "group": "Conversational Agent",
+    "sectionId": "cost-gate",
+    "sectionTitle": "Query cost gate",
+    "text": "Generated SQL queries are cost-estimated before execution using table cardinalities, selectivity factors per filter, and a required-filter policy per table. The estimate produces a traffic-light tier: green (run normally), yellow (run, but log a slow-query warning), red (refuse to run — return a callout with the estimated cost and suggestion chips: pick a site, last 7 days, top 50 offenders, cancel). Tables with high cardinality require specific filters. For example, hourly_intermediate_kpis_table requires both USID and DATE_ID. Queries missing required filters are gated to red regardless of the row estimate."
+  },
+  {
+    "pageId": "agent-guardrails",
+    "pageTitle": "Agent guardrails",
+    "group": "Conversational Agent",
+    "sectionId": "intent-classifier",
+    "sectionTitle": "Intent classifier",
+    "text": "A three-layer classifier (explicit keyword, semantic embedding, and context-aware) maps free-form input to navigation, tools, or chat. It powers the navigation orchestrator — phrases like 'open observe' or 'show me sites with alarms' navigate the user and optionally pre-set filters or layers."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "site-map",
+    "sectionTitle": "Site map",
+    "text": "A Mapbox-GL map renders the 6,800+ sites in the selected market. Sites are coloured by severity — red for top degraded, orange for active outage, blue for nominal. Zoom, pan, and click any marker to open the site detail panel."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "map-layers",
+    "sectionTitle": "Map layers",
+    "text": "Three intelligence layers can be toggled from the map controls or from chat via the set_map_layer tool: degraded (top offenders ranked by total CQX impact), outage (sites with an active outage flag in site_table), overutilized (sites whose PRB utilization exceeds the configured threshold)."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "site-detail",
+    "sectionTitle": "Site detail panel",
+    "text": "Clicking a site opens a sliding panel with five tabs. The header carries a Summary / Diagnostic toggle and a status pill row (e.g. TOP DEGRADED, OUTAGE). The five tabs are: Site KPI (multi-KPI dashboard with daily/hourly toggle), RCA (animated root-cause story with evidence and an inline mini-map), Operational Info (alarms, tickets, configuration changes, outages, and EIM orders for the site and its top neighbors over the last 7 days), Site Topology (cells grouped by band with hover-lift tiles), AI Analyzer (deep investigation workflow run on demand)."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "kpi-dashboard",
+    "sectionTitle": "KPI dashboard",
+    "text": "The dashboard renders up to eight KPIs simultaneously, each on its own line chart with a unit-aware Y-axis, anomaly markers, and a colour drawn from a shared 20-colour palette. The daily mode defaults to 30 days; hourly mode defaults to 48 hours. KPIs are grouped by category — Throughput, Accessibility, Utilization, Quality, Availability — and can be extended with user-defined custom KPIs."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "worst-offenders",
+    "sectionTitle": "Worst offenders",
+    "text": "A daily ranked list of sites by total CQX impact. Each row exposes a one-click link to the site detail panel and an inline Explain RCA button that triggers an in-line explanation in chat."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "cluster-comparison",
+    "sectionTitle": "Cluster comparison",
+    "text": "For any KPI, compare_with_cluster ranks the source site among its cluster peers and computes its percentile. Sites more than two standard deviations below the cluster mean are flagged as outliers. The output is rendered as a bar chart with the source site highlighted."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "neighbor-overlay",
+    "sectionTitle": "Neighbor overlay",
+    "text": "When viewing a site, top handover neighbors render as dashed lines on the map with handover-share labels. Clicking a neighbor pivots the panel to that site without losing context."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "telemetry-dashboard",
+    "sectionTitle": "Telemetry dashboard",
+    "text": "A five-tab telemetry view with semicircular gauges for headline KPIs (CQI, RSRP), hourly heatmaps, and KPI trend mini-charts. Designed for at-a-glance health monitoring without leaving the site context."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "compass-dashboard",
+    "sectionTitle": "Compass market dashboard",
+    "text": "A market-level KPI tile grid that aggregates across all selected sites. Intended as the at-a-glance Network Management home."
+  },
+  {
+    "pageId": "observe",
+    "pageTitle": "Naavik Observe",
+    "group": "Modules",
+    "sectionId": "map-chat-bar",
+    "sectionTitle": "Map chat bar",
+    "text": "A persistent chat input docked to the bottom of the map view. Pre-fills with the selected site's USID so users can ask 'what is wrong here' without typing the identifier."
+  },
+  {
+    "pageId": "site-analyzer",
+    "pageTitle": "AI Site Analyzer",
+    "group": "Modules",
+    "sectionId": "workflow",
+    "sectionTitle": "Investigation workflow",
+    "text": "The Analyzer tab triggers a structured workflow that runs the deep site-analysis tool suite in parallel. The investigation steps are: get_site_topology to understand cell and band structure; get_site_outages to check for active or recent outages; get_hourly_trends to look at the last three days of headline KPIs; get_kpi_impact_breakdown to identify which CQX dimension is most affected; get_config_changes to check parameter changes in the last 7 days; get_ret_changes to check antenna tilt changes in the last 14 days; get_neighbor_relations plus get_neighbor_outages to assess the surrounding network; compare_with_cluster to confirm whether the issue is site-specific."
+  },
+  {
+    "pageId": "site-analyzer",
+    "pageTitle": "AI Site Analyzer",
+    "group": "Modules",
+    "sectionId": "output",
+    "sectionTitle": "Output layout",
+    "text": "The analyzer renders a vertical stack: a hero severity card with an animated orb and the verdict headline, four verdict-section cards (What Changed, Degraded, Likely Root Cause, Next Actions), an investigation trail listing which tools fired and what each returned, and grouped supporting evidence — charts, tables, callouts."
+  },
+  {
+    "pageId": "appgen",
+    "pageTitle": "Naavik AppGen",
+    "group": "Modules",
+    "sectionId": "pipeline",
+    "sectionTitle": "Six-stage pipeline",
+    "text": "Stage 1 Planning produces target KPI, trigger condition, action, scope, failure modes. Stage 2 Code Generation produces rApp code, config YAML, K8s manifests, tests. Stage 3 Code Audit produces security and correctness findings with severity tags. Stage 4 Unit Testing runs unit tests for the rApp logic in a sandbox. Stage 5 Integration Validation runs an end-to-end smoke test against a simulated network. Stage 6 App Assembly produces a deployable bundle with manifests and metadata."
+  },
+  {
+    "pageId": "appgen",
+    "pageTitle": "Naavik AppGen",
+    "group": "Modules",
+    "sectionId": "conversational-builder",
+    "sectionTitle": "Conversational builder",
+    "text": "The builder accepts a natural-language requirement, asks clarifying questions when the requirement is ambiguous, and produces a structured plan before any code is written. The plan is shown to the user for approval."
+  },
+  {
+    "pageId": "appgen",
+    "pageTitle": "Naavik AppGen",
+    "group": "Modules",
+    "sectionId": "scaffold",
+    "sectionTitle": "Scaffold confirmation",
+    "text": "Before code generation begins, the agent presents the file scaffold — the list of files that will be created and what each contains. The user can approve the scaffold or reject it and revise the plan."
+  },
+  {
+    "pageId": "appgen",
+    "pageTitle": "Naavik AppGen",
+    "group": "Modules",
+    "sectionId": "live-files",
+    "sectionTitle": "Live file generation panel",
+    "text": "Files appear in a side panel as they are written. Each file shows progress and a syntax-highlighted preview when complete. The Monaco editor lets you inspect and hand-edit any file inline."
+  },
+  {
+    "pageId": "appgen",
+    "pageTitle": "Naavik AppGen",
+    "group": "Modules",
+    "sectionId": "state-machine",
+    "sectionTitle": "State machine and backward navigation",
+    "text": "The pipeline is a state machine. Users can rewind to any prior stage, edit the output or the input, and re-run forward. State is persisted per project so iteration does not require restarting from scratch."
+  },
+  {
+    "pageId": "appgen",
+    "pageTitle": "Naavik AppGen",
+    "group": "Modules",
+    "sectionId": "rapp-packager",
+    "sectionTitle": "rApp packager",
+    "text": "The packager produces a Kubernetes-ready Helm chart with values.yaml, a deployment manifest, and a service manifest. The chart is downloadable or can be published to the internal catalog."
+  },
+  {
+    "pageId": "appgen",
+    "pageTitle": "Naavik AppGen",
+    "group": "Modules",
+    "sectionId": "catalog",
+    "sectionTitle": "App catalog",
+    "text": "A searchable catalog of existing rApps. Search uses embeddings plus a LangChain reranker to surface the most relevant prior art for a given goal. Clone any app as the starting point for a new project."
+  },
+  {
+    "pageId": "appgen",
+    "pageTitle": "Naavik AppGen",
+    "group": "Modules",
+    "sectionId": "memory",
+    "sectionTitle": "AppGen memory",
+    "text": "Per-project conversation memory is stored in PostgreSQL alongside cross-project lessons. The memory is surfaced as suggestions during planning, so prior best practices are reused automatically."
+  },
+  {
+    "pageId": "provision",
+    "pageTitle": "Naavik Provision",
+    "group": "Modules",
+    "sectionId": "change-request",
+    "sectionTitle": "Change request flow",
+    "text": "The change-request UI is a multi-step form that captures the target sites, parameter, old and new values, justification, and target window. Submitted requests are tracked through the provisioning status board."
+  },
+  {
+    "pageId": "provision",
+    "pageTitle": "Naavik Provision",
+    "group": "Modules",
+    "sectionId": "oss-adapter",
+    "sectionTitle": "OSS adapter framework",
+    "text": "A pluggable adapter interface backs both real OSS connectors (Ericsson Network Manager, MOSES) and an in-process simulator. The simulator is the default in development. ENM is feature-flagged per market."
+  },
+  {
+    "pageId": "provision",
+    "pageTitle": "Naavik Provision",
+    "group": "Modules",
+    "sectionId": "status-board",
+    "sectionTitle": "Status board",
+    "text": "Lists in-flight, completed, and failed changes. Each row exposes the OSS audit log and a one-click rollback option."
+  },
+  {
+    "pageId": "provision",
+    "pageTitle": "Naavik Provision",
+    "group": "Modules",
+    "sectionId": "control-agent",
+    "sectionTitle": "Control agent automation",
+    "text": "Chat phrases like 'increase qRxLevMin by 2 dB on USID 9787' trigger the full pipeline: validate parameter, draft change, queue, push, monitor. Status streams back into the chat as a live execution_status block."
+  },
+  {
+    "pageId": "provision",
+    "pageTitle": "Naavik Provision",
+    "group": "Modules",
+    "sectionId": "automation-templates",
+    "sectionTitle": "Automation templates",
+    "text": "Pre-built templates such as HOSR-driven traffic balancing automatically pick the relevant neighbor relations, compute per-relation offsets, and push the change through the OSS layer."
+  },
+  {
+    "pageId": "knowledge",
+    "pageTitle": "Knowledge library",
+    "group": "Modules",
+    "sectionId": "overview",
+    "sectionTitle": "Knowledge library overview",
+    "text": "The knowledge library is grounded in the Ericsson EIAP DataDict — approximately 16,000 parameter entries indexed for exact, prefix, and fuzzy match. The DataDict is loaded into memory at backend startup."
+  },
+  {
+    "pageId": "knowledge",
+    "pageTitle": "Knowledge library",
+    "group": "Modules",
+    "sectionId": "qna",
+    "sectionTitle": "Q&A",
+    "text": "Ask 'what is qRxLevMin?' or 'explain DATA_DROP_RATE'. The system returns the parameter description, valid range, default value, and usage notes."
+  },
+  {
+    "pageId": "knowledge",
+    "pageTitle": "Knowledge library",
+    "group": "Modules",
+    "sectionId": "fuzzy-match",
+    "sectionTitle": "Fuzzy match",
+    "text": "Misspelled or informal names (DL_TROUGHPUT, drop rate) are auto-corrected via trigram fuzzy match. When multiple candidates score similarly the system surfaces a chip selector and waits for the user to pick."
+  },
+  {
+    "pageId": "knowledge",
+    "pageTitle": "Knowledge library",
+    "group": "Modules",
+    "sectionId": "param-to-kpi",
+    "sectionTitle": "Parameter to KPI cross-reference",
+    "text": "Reverse lookup answers 'which parameters affect drop rate?' by mapping every KPI to the parameters known to influence it."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "mirror-overview",
+    "sectionTitle": "Mirror overview",
+    "text": "A dedicated mirror.* schema in the local Postgres holds faithful copies of 14 remote tables. Column names, row shape, and data types all match. The mirror is built and maintained by the backend on startup."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "offender-strategy",
+    "sectionTitle": "Offender-only strategy",
+    "text": "The mirror only contains rows for offender USIDs — sites where chain_of_thought is not null on a given day. That is approximately 50 to 100 USIDs per day times 30 days, which keeps the dataset small while preserving full RCA detail."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "backfill",
+    "sectionTitle": "Initial backfill",
+    "text": "On first backend boot, a non-blocking backfill runs for the last 30 days. Days run sequentially and tables within a day run in parallel batches of four to keep both the remote and local databases responsive."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "daily-sync",
+    "sectionTitle": "Daily incremental sync",
+    "text": "A cron-style scheduler runs runForDate(yesterday) every day. The hour is configurable via the MIRROR_DAILY_HOUR_UTC environment variable; the default is 03:00 UTC."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "retention",
+    "sectionTitle": "Retention sweep",
+    "text": "After every daily sync, all mirror tables are pruned of rows older than 30 days. This keeps storage bounded and queries fast."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "chunking",
+    "sectionTitle": "High-cardinality chunking",
+    "text": "hourly_intermediate_kpis_table contains roughly 36,000 rows per offender per day. The sync chunks the offender USID list (five per chunk) and runs three concurrent chunks to avoid the ten-minute remote query timeout."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "sargable",
+    "sectionTitle": "SARGable predicates",
+    "text": "All mirror queries use date_id::date BETWEEN $1::date AND $2::date instead of CAST(DATE_ID AS DATE), so the planner can still use the date_id index."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "mirror-or-remote",
+    "sectionTitle": "mirrorOrRemote router",
+    "text": "A generic helper runs the local query first; on zero rows or an error, it transparently falls back to remote. Every site-analysis tool and the KPI dashboard use this router so users never see a missing-data gap."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "shims",
+    "sectionTitle": "Legacy schema shims",
+    "text": "public.filtered_sites, public.cqx_offenders_truth_table, public.filtered_cell_table, public.filtered_sector_table, and public.filtered_cell_sector_map_view are auto-created views over the mirror with PascalCase column aliases. Legacy callers continue to work without code changes."
+  },
+  {
+    "pageId": "data-layer",
+    "pageTitle": "Data layer and mirror",
+    "group": "Architecture",
+    "sectionId": "admin",
+    "sectionTitle": "Admin endpoints",
+    "text": "POST /api/mirror/backfill?days=30 triggers a manual backfill. GET /api/mirror/status returns the latest run log. Both endpoints are JWT-protected."
+  },
+  {
+    "pageId": "schema-reference",
+    "pageTitle": "Schema reference",
+    "group": "Architecture",
+    "sectionId": "tables",
+    "sectionTitle": "Tables in scope",
+    "text": "Tables mirrored from the remote MSSQL source include: site_table (site metadata, location, outage flag), cell_table (cell-level inventory and anomaly state), sector_table (sector-level metadata), intermediate_kpi_table (daily KPI values per cell), hourly_intermediate_kpis_table (hourly KPI values per cell, approximately 72 million rows over 30 days), subcomponent_table (CQX sub-component contributions), cqx_offenders_truth_table (daily offender ranking with impact scores), configuration_parameters_table (parameter change log Old then New), ret_table (remote electrical tilt snapshots), outage_table (per-cell outage events), ticket_table (trouble tickets), alarm_table (active alarms), eim_table (EIM work orders), neighbors_table_date_id (per-day neighbor relations with handover statistics)."
+  },
+  {
+    "pageId": "schema-reference",
+    "pageTitle": "Schema reference",
+    "group": "Architecture",
+    "sectionId": "required-filters",
+    "sectionTitle": "Required filters",
+    "text": "Some tables are too large to scan unfiltered. The query cost gate enforces that the following filters are present before any query is sent to the remote source: intermediate_kpi_table requires USID; hourly_intermediate_kpis_table requires USID and DATE_ID; subcomponent_table requires USID; configuration_parameters_table requires USID; outage_table requires USID; ret_table requires USID; neighbors_table_date_id requires SOURCE_USID. Queries missing a required filter are rejected at the cost gate with a callout that suggests how to narrow the request — pick a site, choose the last seven days, or limit to the top 50 offenders."
+  },
+  {
+    "pageId": "schema-reference",
+    "pageTitle": "Schema reference",
+    "group": "Architecture",
+    "sectionId": "schema-ref-cache",
+    "sectionTitle": "Live schema reference cache",
+    "text": "The backend caches distinct KPI names, subcomponent names, and the column list of each table. The cache refreshes hourly and grounds both the SQL generator and the KPI validator."
+  },
+  {
+    "pageId": "generative-ui",
+    "pageTitle": "Generative UI blocks",
+    "group": "Reference",
+    "sectionId": "overview",
+    "sectionTitle": "Generative UI overview",
+    "text": "Every chat response is a stream of typed UI blocks. The renderer maps each block to a React component. Adjacent compact tables are automatically paired into a two-column grid for denser output."
+  },
+  {
+    "pageId": "generative-ui",
+    "pageTitle": "Generative UI blocks",
+    "group": "Reference",
+    "sectionId": "block-types",
+    "sectionTitle": "Block types",
+    "text": "Available block types: data_table (interactive AG-Grid table with filter, sort, and per-row Explain RCA); compact_table (lightweight dense table, auto-styles numeric and anomaly columns); kpi_dashboard (multi-KPI line chart panel with daily/hourly toggle); insight_chart (single ECharts panel for ad-hoc visualizations); stat_row (horizontal row of label/value stat tiles); callout (tone-coloured info, success, warning, or error box); chips (row of clickable pill prompts); ranked_list (vertical ranked list with severity dots and trend sparkline); rca_story (narrative root-cause card with steps, evidence, and conclusion); rca_summary (condensed RCA card with bucket, confidence, and summary); ticket_escalation (pre-filled escalation card); execution_status (live workflow status with stage list and progress); tabs (tabbed container with nested blocks per tab); grid_layout (responsive multi-column container for nested blocks); map_inset (inline Mapbox preview rendered inside a chat message); code_view (syntax-highlighted code block with copy); diagnosis_card (severity hero strip with four verdict-section cards); severity_meter (horizontal gauge bars for KPI sub-components); topology_grid (cells grouped by band with hover-lift tiles); saved_dashboard_modal (persist a dashboard configuration); saved_dashboards (list of saved dashboards with reload, rename, delete); cost_warning (cost-gate callout returned when a query would scan too much data)."
+  },
+  {
+    "pageId": "generative-ui",
+    "pageTitle": "Generative UI blocks",
+    "group": "Reference",
+    "sectionId": "auto-pairing",
+    "sectionTitle": "Auto-pairing",
+    "text": "When the agent emits two or more compact tables in a single response, the renderer automatically groups them into a two-column grid. This keeps multi-table answers scannable without an explicit layout request."
+  },
+  {
+    "pageId": "settings",
+    "pageTitle": "Settings",
+    "group": "Reference",
+    "sectionId": "appearance",
+    "sectionTitle": "Appearance",
+    "text": "Appearance settings include Theme (Light, Dark, or Auto) and Default landing page (Home, Observe, or AppGen)."
+  },
+  {
+    "pageId": "settings",
+    "pageTitle": "Settings",
+    "group": "Reference",
+    "sectionId": "kpi-library",
+    "sectionTitle": "KPI library",
+    "text": "Edit the standard KPI groups and add user-saved custom KPIs. Custom KPIs appear in the KPI selector everywhere the dashboard is used."
+  },
+  {
+    "pageId": "settings",
+    "pageTitle": "Settings",
+    "group": "Reference",
+    "sectionId": "app-permissions",
+    "sectionTitle": "App permissions",
+    "text": "Admin-only. A matrix of users by registered apps; toggling a cell grants or revokes access. Disabled apps are hidden from the user's left rail."
+  },
+  {
+    "pageId": "settings",
+    "pageTitle": "Settings",
+    "group": "Reference",
+    "sectionId": "appgen-defaults",
+    "sectionTitle": "AppGen defaults",
+    "text": "Per-user defaults for AppGen runs — preferred LLM model, Kubernetes context, default OSS adapter, and scaffold preferences."
+  },
+  {
+    "pageId": "settings",
+    "pageTitle": "Settings",
+    "group": "Reference",
+    "sectionId": "demo-mode",
+    "sectionTitle": "Demo mode (anonymized USIDs)",
+    "text": "A single toggle that masks every real USID as UST###### across the entire app. Reverse mapping is automatic in chat: a user can type the masked identifier and the system translates it back before sending to the backend."
+  },
+  {
+    "pageId": "settings",
+    "pageTitle": "Settings",
+    "group": "Reference",
+    "sectionId": "saved-dashboards",
+    "sectionTitle": "Saved dashboards",
+    "text": "Any KPI dashboard configuration (site, KPIs, timeframe, days) can be saved with a name. Saved dashboards appear in the sidebar with one-click reload, rename, and delete."
+  },
+  {
+    "pageId": "glossary",
+    "pageTitle": "Glossary",
+    "group": "Reference",
+    "sectionId": "terms",
+    "sectionTitle": "Glossary of terms",
+    "text": "CQX is Composite Quality of Experience — Naavik's blended quality score with sub-components for throughput, drop, accessibility, voice, and quality. DataDict is the Ericsson EIAP parameter catalog with approximately 16,000 entries with description, range, and default value. EIM is Engineering Information Management — internal change-management system. ENM is Ericsson Network Manager — OSS for parameter changes. HOSR is Handover Success Rate. KPI is Key Performance Indicator; names follow the convention DL_DRB_TPUT, DATA_RAN_ACC, HOSR, and so on. Offender is a site appearing in cqx_offenders_truth_table for a given day with a non-null chain_of_thought. PRB is Physical Resource Block — LTE/NR scheduling unit. RAN is Radio Access Network. RCA is Root Cause Analysis. rApp is a Radio application packaged for a Kubernetes-based RIC. RET is Remote Electrical Tilt — antenna tilt control parameter. SARGable is Search-ARGument-able — a predicate the query planner can use with an index. USID is Unique Site Identifier — primary key for a site across all tables."
+  },
+  {
+    "pageId": "troubleshooting",
+    "pageTitle": "Troubleshooting",
+    "group": "Reference",
+    "sectionId": "login",
+    "sectionTitle": "I cannot log in",
+    "text": "Confirm backend/.env defines ADMIN_USERNAME, ADMIN_PASSWORD_HASH, and JWT_SECRET. Clear localStorage and reload — a stale or expired token can wedge the bootstrap. Check the backend log for [auth] entries; bcrypt mismatches are logged explicitly."
+  },
+  {
+    "pageId": "troubleshooting",
+    "pageTitle": "Troubleshooting",
+    "group": "Reference",
+    "sectionId": "no-data",
+    "sectionTitle": "A site shows no data",
+    "text": "The USID may not be in the offender set, so the mirror has nothing. mirrorOrRemote should fall through to remote automatically; if it does not, check the run log. Hit GET /api/mirror/status to confirm a recent sync. Force a backfill with POST /api/mirror/backfill?days=7."
+  },
+  {
+    "pageId": "troubleshooting",
+    "pageTitle": "Troubleshooting",
+    "group": "Reference",
+    "sectionId": "query-blocked",
+    "sectionTitle": "The agent says my query was blocked by the cost gate",
+    "text": "The query was rejected because it would scan too much data. Use one of the suggestion chips returned with the callout: pick a site, choose the last seven days, or limit to the top 50 offenders."
+  },
+  {
+    "pageId": "troubleshooting",
+    "pageTitle": "Troubleshooting",
+    "group": "Reference",
+    "sectionId": "unknown-kpi",
+    "sectionTitle": "The agent says my KPI does not exist",
+    "text": "The requested name did not match the live schema or anything close enough in the DataDict. Try a canonical name such as DL_DRB_TPUT, DATA_RAN_ACC, HOSR, or DL_PKTLOSS_RT. The DataDict reference is searchable from the Knowledge stream."
+  },
+  {
+    "pageId": "troubleshooting",
+    "pageTitle": "Troubleshooting",
+    "group": "Reference",
+    "sectionId": "agent-stuck",
+    "sectionTitle": "The agent appears stuck",
+    "text": "Click the Stop button. The Send button morphs into a stop control while a request is in flight; clicking it aborts the in-flight call and frees the composer immediately."
+  },
+  {
+    "pageId": "troubleshooting",
+    "pageTitle": "Troubleshooting",
+    "group": "Reference",
+    "sectionId": "mirror-slow",
+    "sectionTitle": "Initial backfill is taking a long time",
+    "text": "The 30-day backfill of hourly_intermediate_kpis_table can take 10 to 20 minutes in total on first boot. Subsequent daily syncs cover a single day and finish in under a minute. Use GET /api/mirror/status to monitor progress; the run log lists per-table durations."
+  }
+]

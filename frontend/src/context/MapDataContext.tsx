@@ -100,8 +100,8 @@ interface MapDataContextType {
   setOffenderSiteIds: (ids: Set<string>) => void;
   selectedDateId: string;
   setSelectedDateId: (dateId: string) => void;
-  activeSiteLayer: 'degraded' | 'outage' | 'overutilized';
-  setActiveSiteLayer: (layer: 'degraded' | 'outage' | 'overutilized') => void;
+  activeSiteLayer: 'degraded' | 'outage' | 'overutilized' | null;
+  setActiveSiteLayer: (layer: 'degraded' | 'outage' | 'overutilized' | null) => void;
   /** Optional UI focus requested by chat/commands (USID, USTxxxx, or site token) */
   focusSiteToken: string | null;
   setFocusSiteToken: (token: string | null) => void;
@@ -111,6 +111,15 @@ interface MapDataContextType {
   /** Pending tab navigation request from chat */
   chatTabRequest: ChatTabRequest | null;
   dispatchTabRequest: (req: Omit<ChatTabRequest, 'ts'>) => void;
+  /** Events layer (concerts, weather, news) on/off — shared so chat can toggle it */
+  eventsLayerEnabled: boolean;
+  setEventsLayerEnabled: (enabled: boolean) => void;
+  /** External base-map overlay (MapLibre / Esri) on/off */
+  externalMapLayerEnabled: boolean;
+  setExternalMapLayerEnabled: (enabled: boolean) => void;
+  /** Which external map provider is active */
+  externalMapProvider: 'maplibre' | 'esri';
+  setExternalMapProvider: (provider: 'maplibre' | 'esri') => void;
 }
 
 const MapDataContext = createContext<MapDataContextType | undefined>(undefined);
@@ -139,10 +148,13 @@ export function MapDataProvider({ children }: { children: ReactNode }) {
   const [offenderSiteIds, setOffenderSiteIds] = useState<Set<string>>(new Set());
   const [selectedDateId, setSelectedDateId] = useState<string>(DEFAULT_MAP_DATE);
   const [dataDateId, setDataDateId] = useState<string>(DEFAULT_MAP_DATE);
-  const [activeSiteLayer, setActiveSiteLayer] = useState<'degraded' | 'outage' | 'overutilized'>('degraded');
+  const [activeSiteLayer, setActiveSiteLayer] = useState<'degraded' | 'outage' | 'overutilized' | null>('degraded');
   const [focusSiteToken, setFocusSiteToken] = useState<string | null>(null);
   const [chatHighlightSiteIds, setChatHighlightSiteIds] = useState<Set<string>>(new Set());
   const [chatTabRequest, setChatTabRequest] = useState<ChatTabRequest | null>(null);
+  const [eventsLayerEnabled, setEventsLayerEnabled] = useState<boolean>(true);
+  const [externalMapLayerEnabled, setExternalMapLayerEnabled] = useState<boolean>(false);
+  const [externalMapProvider, setExternalMapProvider] = useState<'maplibre' | 'esri'>('maplibre');
 
   const dispatchTabRequest = (req: Omit<ChatTabRequest, 'ts'>) => {
     setChatTabRequest({ ...req, ts: Date.now() });
@@ -500,6 +512,12 @@ export function MapDataProvider({ children }: { children: ReactNode }) {
         setChatHighlightSiteIds,
         chatTabRequest,
         dispatchTabRequest,
+        eventsLayerEnabled,
+        setEventsLayerEnabled,
+        externalMapLayerEnabled,
+        setExternalMapLayerEnabled,
+        externalMapProvider,
+        setExternalMapProvider,
       }}
     >
       {children}

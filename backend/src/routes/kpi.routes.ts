@@ -8,6 +8,7 @@ import { asyncHandler, AppError } from '../middleware/errorHandler.js';
 import { cacheOrFetch } from '../utils/cache.js';
 import { pool } from '../config/database.js';
 import { logger } from '../utils/logger.js';
+import { dbSchemaRef } from '../services/db-schema-reference.service.js';
 
 const router = Router();
 
@@ -36,6 +37,25 @@ function uniqueKpis(kpis: string[]): string[] {
   return out;
 }
 
+
+/**
+ * GET /api/kpis/catalog
+ * Fast, cached list of every distinct KPI name known to the DB schema
+ * reference. Used by the chat dashboard "Add KPI" picker. Hourly-refreshed
+ * in-memory cache, no DB round-trip on the request path.
+ */
+router.get('/catalog', asyncHandler(async (_req: Request, res: Response) => {
+  const names = dbSchemaRef.getKpiNames();
+  const status = dbSchemaRef.status();
+  res.json({
+    success: true,
+    data: {
+      names,
+      count: names.length,
+      cacheStatus: status,
+    },
+  });
+}));
 
 /**
  * GET /api/kpis

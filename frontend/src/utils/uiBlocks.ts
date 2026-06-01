@@ -19,6 +19,11 @@ const ALLOWED_TYPES = new Set<string>([
   'execution_status',
   'code_view',
   'insight_chart',
+  'compact_table',
+  'diagnosis_card',
+  'severity_meter',
+  'topology_grid',
+  'recommendation_card',
 ]);
 
 const MAX_DEPTH = 5;
@@ -62,17 +67,61 @@ function sanitizeOne(input: any, depth: number): UiBlock | null {
 
   if (type === 'chips') {
     if (!isPlainObject(data) || !Array.isArray((data as any).chips)) return null;
+    // Two chip shapes are accepted:
+    //   - Classic:  { label, value, description? }                — fires `value` verbatim.
+    //   - Followup: { label, prompt, needs?, intent?, description? } — may carry inline questions.
+    const sanitizeNeeds = (rawNeeds: any): any[] | undefined => {
+      if (!Array.isArray(rawNeeds)) return undefined;
+      const cleaned = rawNeeds
+        .slice(0, 6)
+        .map((q: any) => {
+          if (!isPlainObject(q)) return null;
+          const id = String(q.id || '').trim();
+          const text = String(q.text || '').trim();
+          const mode = ['single', 'multi', 'free'].includes(q.mode) ? q.mode : 'single';
+          if (!id || !text) return null;
+          const options = Array.isArray(q.options)
+            ? q.options
+                .slice(0, 24)
+                .map((o: any) => ({
+                  key: clampText(o?.key, 120),
+                  label: clampText(o?.label, 120),
+                  description: o?.description ? clampText(o.description, 160) : undefined,
+                }))
+                .filter((o: any) => o.key && o.label)
+            : undefined;
+          return {
+            id: clampText(id, 60),
+            text: clampText(text, 200),
+            mode,
+            options,
+            allowFreeText: !!q.allowFreeText,
+            placeholder: q.placeholder ? clampText(q.placeholder, 120) : undefined,
+            defaultValue: q.defaultValue ? clampText(q.defaultValue, 120) : undefined,
+            required: typeof q.required === 'boolean' ? q.required : undefined,
+          };
+        })
+        .filter(Boolean);
+      return cleaned.length ? cleaned : undefined;
+    };
+
     const chips = (data as any).chips
       .slice(0, 12)
-      .map((c: any) => ({
-        label: clampText(c?.label, 80),
-        value: clampText(c?.value, 600),
-        description: c?.description ? clampText(c.description, 160) : undefined,
-      }))
-      .filter((c: any) => c.label && c.value);
+      .map((c: any) => {
+        const label = clampText(c?.label, 80);
+        const description = c?.description ? clampText(c.description, 200) : undefined;
+        const intent = c?.intent ? clampText(c.intent, 80) : undefined;
+        const needs = sanitizeNeeds(c?.needs);
+        // Prefer `prompt` (followup) over legacy `value`. Either may be present.
+        const promptStr = c?.prompt ?? c?.value;
+        const prompt = promptStr ? clampText(promptStr, 1200) : undefined;
+        return { label, description, intent, needs, prompt, value: prompt };
+      })
+      .filter((c: any) => c.label && c.prompt);
     if (!chips.length) return null;
     const prompt = (data as any).prompt ? clampText((data as any).prompt, 300) : undefined;
-    return { type: 'chips', id, title, data: { prompt, chips } };
+    const variant = (data as any).variant ? clampText((data as any).variant, 40) : undefined;
+    return { type: 'chips', id, title, data: { prompt, chips, variant } };
   }
 
   if (type === 'stat_row') {
@@ -192,7 +241,12 @@ function sanitizeOne(input: any, depth: number): UiBlock | null {
     type === 'rca_report' ||
     type === 'ticket_escalation' ||
     type === 'execution_status' ||
-    type === 'code_view'
+    type === 'code_view' ||
+    type === 'compact_table' ||
+    type === 'diagnosis_card' ||
+    type === 'severity_meter' ||
+    type === 'topology_grid' ||
+    type === 'recommendation_card'
   ) {
     return { type: type as any, id, title, data: data as any };
   }

@@ -2,6 +2,10 @@
  * Naavik Database Connector
  * Port of Python NaavikDBConnector to TypeScript
  * Connects to remote Naavik database via HTTP API
+ *
+ * Circuit-breaker: after CIRCUIT_OPEN_THRESHOLD consecutive failures the
+ * connector stops attempting remote calls for CIRCUIT_OPEN_MS and throws
+ * immediately, preventing tool pile-up when the remote is unreachable.
  */
 import axios, { AxiosInstance } from 'axios';
 import { logger } from '../utils/logger.js';
@@ -17,13 +21,53 @@ export interface KPIDataPoint {
   kpi_value: number | null;
 }
 
+// ─── Circuit breaker constants ───────────────────────────────────────────────
+// Each NaavikDBConnector instance manages its own circuit breaker so that a
+// slow-query timeout on the 8-second connector doesn't block the 30-second
+// connector (and vice-versa).
+// Only genuine connection errors (ECONNREFUSED, EHOSTUNREACH, etc.) open the
+// circuit — timeouts are query-specific and do NOT count.
+const CIRCUIT_OPEN_THRESHOLD = 5;    // connection errors before opening
+const CIRCUIT_OPEN_MS        = 30_000; // stay open for 30 s
+
+// Shared "global unreachable" flag — set only when a connector has a true
+// connection failure (not a timeout). Used by mirrorOrRemote to decide whether
+// to skip the remote call entirely.
+let _globalCbFailures  = 0;
+let _globalCbOpenUntil = 0;
+
+function globalCbRecord(connectionError: boolean): void {
+  if (!connectionError) { _globalCbFailures = 0; _globalCbOpenUntil = 0; return; }
+  _globalCbFailures++;
+  _globalCbOpenUntil = Date.now() + CIRCUIT_OPEN_MS;
+  if (_globalCbFailures >= CIRCUIT_OPEN_THRESHOLD) {
+    logger.warn(`[remote-db] global circuit OPEN after ${_globalCbFailures} connection errors`);
+  }
+}
+
+function globalCbIsOpen(): boolean {
+  if (_globalCbFailures < CIRCUIT_OPEN_THRESHOLD) return false;
+  if (Date.now() > _globalCbOpenUntil) {
+    logger.info('[remote-db] global circuit cool-down expired — probing remote');
+    _globalCbFailures = CIRCUIT_OPEN_THRESHOLD - 1;
+    return false;
+  }
+  return true;
+}
+
+// ─── Connector ───────────────────────────────────────────────────────────────
+
 export class NaavikDBConnector {
   private client: AxiosInstance;
   private baseUrl: string;
   // private static readonly DEFAULT_REMOTE_DB_URL = 'http://3.132.55.183:9050/api/query';
   private static readonly DEFAULT_REMOTE_DB_URL = 'http://3.20.40.252:9876/api/query';
 
-  constructor(baseUrl?: string) {
+  // Per-instance circuit breaker (timeouts do NOT count — only connection errors).
+  private cbFailures  = 0;
+  private cbOpenUntil = 0;
+
+  constructor(baseUrl?: string, timeoutOverrideMs?: number) {
     const envUrl = process.env.REMOTE_DB_URL;
     const requestedUrl = baseUrl || envUrl || NaavikDBConnector.DEFAULT_REMOTE_DB_URL;
     if (requestedUrl !== NaavikDBConnector.DEFAULT_REMOTE_DB_URL) {
@@ -32,17 +76,43 @@ export class NaavikDBConnector {
       );
     }
     this.baseUrl = NaavikDBConnector.DEFAULT_REMOTE_DB_URL;
-    
+
+    // Interactive agent queries: 8 s (fast fail, circuit breaker kicks in).
+    // Background mirror sync: 30 s (bulk data, needs more time).
+    // Callers can pass an explicit override; otherwise read REMOTE_DB_TIMEOUT env.
+    const timeoutMs = timeoutOverrideMs ?? parseInt(process.env.REMOTE_DB_TIMEOUT || '8000');
+
     this.client = axios.create({
       baseURL: this.baseUrl,
-      timeout: parseInt(process.env.REMOTE_DB_TIMEOUT || '600000'),
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      timeout: timeoutMs,
+      headers: { 'Content-Type': 'application/json' },
     });
 
-    logger.info(`🔌 NaavikDBConnector using remote query endpoint: ${this.baseUrl}`);
+    logger.info(`🔌 NaavikDBConnector  endpoint=${this.baseUrl}  timeout=${timeoutMs}ms`);
     logger.info('🧠 SQL query dialect: mssql (forced)');
+  }
+
+  /**
+   * Returns true when this instance's circuit breaker is open.
+   * Opened only by connection-level errors (not timeouts).
+   */
+  isUnreachable(): boolean {
+    if (this.cbFailures < CIRCUIT_OPEN_THRESHOLD) return false;
+    if (Date.now() > this.cbOpenUntil) {
+      logger.info('[remote-db] instance circuit cool-down expired — probing');
+      this.cbFailures = CIRCUIT_OPEN_THRESHOLD - 1;
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Returns true when the global circuit is open due to repeated connection
+   * errors across any connector. Use in mirrorOrRemote to skip remote when
+   * the server is truly unreachable.
+   */
+  static isRemoteUnreachable(): boolean {
+    return globalCbIsOpen();
   }
 
   /**
@@ -57,6 +127,10 @@ export class NaavikDBConnector {
    * Execute raw SQL query via API and return results
    */
   private async executeQuery(query: string): Promise<any[]> {
+    if (this.isUnreachable()) {
+      throw new Error('Remote DB unreachable (circuit open — retry in a moment)');
+    }
+
     const table = NaavikDBConnector.extractTable(query);
     const preview = query.replace(/\s+/g, ' ').trim().slice(0, 120);
     const start = Date.now();
@@ -74,6 +148,10 @@ export class NaavikDBConnector {
         logger.info(`  ↳ ${result.length} rows · ${ms}ms`);
       }
 
+      // Success — reset both per-instance and global CBs.
+      this.cbFailures  = 0;
+      this.cbOpenUntil = 0;
+      globalCbRecord(false);
       return result;
     } catch (error: any) {
       const ms = Date.now() - start;
@@ -82,6 +160,34 @@ export class NaavikDBConnector {
         ? `  ${JSON.stringify(error.response.data).slice(0, 200)}`
         : '';
       logger.error(`  ↳ FAILED · ${ms}ms${status} — ${error.message}${detail}`);
+
+      // Only count genuine connection errors toward the circuit breaker.
+      // Timeouts are query-specific (the server is alive, just slow) and
+      // should NOT open the circuit — the next query might be fast.
+      const isTimeout =
+        error.code === 'ECONNABORTED' ||
+        /timeout/i.test(error.message ?? '') ||
+        error.message?.includes('ETIMEDOUT');
+      const isConnectionError =
+        !isTimeout && (
+          error.code === 'ECONNREFUSED' ||
+          error.code === 'EHOSTUNREACH' ||
+          error.code === 'ENOTFOUND' ||
+          error.code === 'ECONNRESET' ||
+          (error?.response?.status >= 500)
+        );
+
+      if (isConnectionError) {
+        this.cbFailures++;
+        this.cbOpenUntil = Date.now() + CIRCUIT_OPEN_MS;
+        if (this.cbFailures >= CIRCUIT_OPEN_THRESHOLD) {
+          logger.warn(`[remote-db] instance circuit OPEN after ${this.cbFailures} connection errors`);
+        }
+        globalCbRecord(true);
+      } else if (isTimeout) {
+        logger.warn(`[remote-db] query timed out after ${ms}ms — server reachable, not counting toward circuit breaker`);
+      }
+
       throw new Error(`Remote DB query failed: ${error.message}`);
     }
   }
@@ -95,8 +201,6 @@ export class NaavikDBConnector {
 
   /**
    * Fetch daily KPI data for a USID — mirror-first, remote fallback.
-   * The local mirror only contains offender USIDs; for non-offenders we
-   * silently fall back to the remote query (no caller-side change needed).
    */
   async fetchDailyKPIs(
     usid: string,
@@ -175,7 +279,7 @@ export class NaavikDBConnector {
   }
 
   /**
-   * Get Super KPI offender USIDs for a specific date (sites with chain_of_thought, sorted by impact)
+   * Get Super KPI offender USIDs for a specific date
    */
   async getOffenderUSIDs(dateId: string): Promise<{ USID: string; Total_Impact_to_SuperKPI_Delta: number }[]> {
     const query = SQLQueries.getOffenderUSIDs(dateId);

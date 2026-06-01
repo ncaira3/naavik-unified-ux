@@ -14,7 +14,7 @@ const { Pool } = pg;
 
 const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5433,
+  port: process.env.DB_PORT || 5435,
   database: process.env.DB_NAME || 'naavik_demo',
   user: process.env.DB_USER || 'naavik_user',
   password: process.env.DB_PASSWORD || 'naavik_pass_2026'

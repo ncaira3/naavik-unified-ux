@@ -22,6 +22,9 @@ export type UiCommandAction =
   // ── Generative UI: map state ───────────────────────────────────────────────
   | { type: 'SET_DATE_FILTER'; dateId: string }
   | { type: 'SET_MAP_LAYER'; layer: 'degraded' | 'outage' | 'overutilized' }
+  | { type: 'CLEAR_MAP_LAYER' }
+  | { type: 'TOGGLE_EVENTS_LAYER'; enabled?: boolean }
+  | { type: 'TOGGLE_EXTERNAL_MAP'; enabled?: boolean; provider?: 'maplibre' | 'esri' }
   // ── Generative UI: app navigation ─────────────────────────────────────────
   | { type: 'NAVIGATE_VIEW'; view: 'observe' | 'appgen' | 'provision' | 'settings' | 'home' };
 
@@ -70,8 +73,18 @@ const CAPABILITIES: UiCommandResult['capabilities'] = [
   },
   {
     id: 'set_layer',
-    label: 'Switch the active site layer on the map',
-    examples: ['Show outage sites', 'Switch to overutilized layer', 'Show degraded sites'],
+    label: 'Switch or clear the active site layer on the map',
+    examples: ['Show outage sites', 'Switch to overutilized layer', 'Show degraded sites', 'Clear the site layer'],
+  },
+  {
+    id: 'toggle_events',
+    label: 'Toggle the local events overlay (concerts, weather, news, sports)',
+    examples: ['Turn on the events layer', 'Hide events', 'Show nearby events', 'Toggle events layer'],
+  },
+  {
+    id: 'toggle_external_map',
+    label: 'Toggle the external base-map overlay (MapLibre or Esri)',
+    examples: ['Show Esri map overlay', 'Enable external map layer', 'Switch to Esri', 'Hide the MapLibre overlay'],
   },
   {
     id: 'navigate',
@@ -122,8 +135,46 @@ function fallbackInterpret(query: string): UiCommandResult {
   if (/\b(overutil|over-util|overutilized)\b/.test(lower)) {
     return { assistantText: 'Switching to overutilized sites layer.', actions: [{ type: 'SET_MAP_LAYER', layer: 'overutilized' }], capabilities: CAPABILITIES };
   }
-  if (/\b(degraded|degrad)\b/.test(lower) && /\b(layer|sites|show|switch)\b/.test(lower)) {
+  if (/\b(degraded|degrad)\b/.test(lower)) {
     return { assistantText: 'Switching to degraded sites layer.', actions: [{ type: 'SET_MAP_LAYER', layer: 'degraded' }], capabilities: CAPABILITIES };
+  }
+  if (/\b(clear|hide|remove|reset)\b/.test(lower) && /\b(layer|filter|site layer|map layer)\b/.test(lower)) {
+    return { assistantText: 'Cleared the site layer filter — showing all sites.', actions: [{ type: 'CLEAR_MAP_LAYER' }], capabilities: CAPABILITIES };
+  }
+
+  // ── Events layer ───────────────────────────────────────────────────────────
+  if (/\b(events?|concert|sports?|weather|news|festival|holiday)\b/.test(lower)) {
+    const hide = /\b(hide|off|disable|turn off|remove)\b/.test(lower);
+    const show = /\b(show|on|enable|turn on|add|toggle)\b/.test(lower);
+    const enabled = hide ? false : (show ? true : undefined);
+    const text = hide ? 'Events layer hidden.' : 'Events layer enabled — showing nearby concerts, sports, weather, and news.';
+    return { assistantText: text, actions: [{ type: 'TOGGLE_EVENTS_LAYER', enabled }], capabilities: CAPABILITIES };
+  }
+
+  // ── External map layer ─────────────────────────────────────────────────────
+  if (/\b(esri|arcgis)\b/.test(lower)) {
+    const hide = /\b(hide|off|disable|turn off|remove)\b/.test(lower);
+    return {
+      assistantText: hide ? 'External map layer hidden.' : 'Switching to Esri map overlay.',
+      actions: [{ type: 'TOGGLE_EXTERNAL_MAP', enabled: hide ? false : true, provider: 'esri' }],
+      capabilities: CAPABILITIES,
+    };
+  }
+  if (/\b(maplibre|openstreetmap|osm|external map)\b/.test(lower)) {
+    const hide = /\b(hide|off|disable|turn off|remove)\b/.test(lower);
+    return {
+      assistantText: hide ? 'External map layer hidden.' : 'Enabling MapLibre overlay.',
+      actions: [{ type: 'TOGGLE_EXTERNAL_MAP', enabled: hide ? false : true, provider: 'maplibre' }],
+      capabilities: CAPABILITIES,
+    };
+  }
+  if (/\b(external map|base.?map overlay)\b/.test(lower)) {
+    const hide = /\b(hide|off|disable|turn off|remove)\b/.test(lower);
+    return {
+      assistantText: hide ? 'External map layer hidden.' : 'External map layer enabled.',
+      actions: [{ type: 'TOGGLE_EXTERNAL_MAP', enabled: hide ? false : true }],
+      capabilities: CAPABILITIES,
+    };
   }
 
   // ── Date filter ────────────────────────────────────────────────────────────
@@ -291,6 +342,9 @@ Generative UI — tab navigation (these open specific panels inside the analysis
 Generative UI — map state:
 - SET_DATE_FILTER: change the map date { dateId: "YYYY-MM-DD" }
 - SET_MAP_LAYER: switch site layer { layer: "degraded"|"outage"|"overutilized" }
+- CLEAR_MAP_LAYER: clear/hide the active site layer, show all sites (no extra params)
+- TOGGLE_EVENTS_LAYER: toggle events overlay (concerts, sports, weather, news) { enabled?: boolean }
+- TOGGLE_EXTERNAL_MAP: toggle base-map overlay { enabled?: boolean, provider?: "maplibre"|"esri" }
 
 Generative UI — app navigation:
 - NAVIGATE_VIEW: go to a section { view: "observe"|"appgen"|"provision"|"settings"|"home" }
@@ -329,11 +383,12 @@ Output schema:
       const assistantText = String(parsed.assistantText || '').trim();
       const actionsRaw = Array.isArray(parsed.actions) ? parsed.actions : [];
 
-      const VALID_TOP_TABS = new Set(['site-kpi', 'rca', 'operational', 'topology']);
-      const VALID_KPI_TABS = new Set(['cqx', 'daily', 'hourly', 'overlay', 'traffic-profile', 'mobility', 'outages']);
-      const VALID_RCA_TABS = new Set(['evidences', 'summary', 'raw-data']);
-      const VALID_LAYERS   = new Set(['degraded', 'outage', 'overutilized']);
-      const VALID_VIEWS    = new Set(['observe', 'appgen', 'provision', 'settings', 'home']);
+      const VALID_TOP_TABS  = new Set(['site-kpi', 'rca', 'operational', 'topology']);
+      const VALID_KPI_TABS  = new Set(['cqx', 'daily', 'hourly', 'overlay', 'traffic-profile', 'mobility', 'outages']);
+      const VALID_RCA_TABS  = new Set(['evidences', 'summary', 'raw-data']);
+      const VALID_LAYERS    = new Set(['degraded', 'outage', 'overutilized']);
+      const VALID_VIEWS     = new Set(['observe', 'appgen', 'provision', 'settings', 'home']);
+      const VALID_PROVIDERS = new Set(['maplibre', 'esri']);
 
       const actions: UiCommandAction[] = actionsRaw
         .map((a: any) => {
@@ -372,6 +427,20 @@ Output schema:
             const layer = String(a?.layer || '');
             if (!VALID_LAYERS.has(layer)) return null;
             return { type, layer } as UiCommandAction;
+          }
+          if (type === 'CLEAR_MAP_LAYER') return { type } as UiCommandAction;
+          if (type === 'TOGGLE_EVENTS_LAYER') {
+            const enabled = a?.enabled == null ? undefined : Boolean(a.enabled);
+            return { type, ...(enabled !== undefined ? { enabled } : {}) } as UiCommandAction;
+          }
+          if (type === 'TOGGLE_EXTERNAL_MAP') {
+            const enabled = a?.enabled == null ? undefined : Boolean(a.enabled);
+            const provider = String(a?.provider || '');
+            return {
+              type,
+              ...(enabled !== undefined ? { enabled } : {}),
+              ...(VALID_PROVIDERS.has(provider) ? { provider } : {}),
+            } as UiCommandAction;
           }
           if (type === 'NAVIGATE_VIEW') {
             const view = String(a?.view || '');

@@ -20,7 +20,7 @@ interface DatabaseConfig {
 
 const config: DatabaseConfig = {
   host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '5433'),
+  port: parseInt(process.env.DB_PORT || '5435'),
   database: process.env.DB_NAME || 'naavik_demo',
   user: process.env.DB_USER || 'naavik_user',
   password: process.env.DB_PASSWORD || 'naavik_pass_2026',

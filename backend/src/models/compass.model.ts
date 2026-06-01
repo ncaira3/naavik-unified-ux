@@ -3,7 +3,9 @@ import { siteIdMapper } from '../services/site-id-mapper.service.js';
 import { pool } from '../config/database.js';
 import { mirrorOrRemote } from '../services/db-mirror/lib/mirror-or-remote.js';
 
-const remoteDbConnector = new NaavikDBConnector();
+// 30 s timeout — map + compass queries can involve large date-range joins.
+// The 8 s default was causing intermittent timeouts and tripping the circuit breaker.
+const remoteDbConnector = new NaavikDBConnector(undefined, 30_000);
 const remoteTableColumnsCache = new Map<string, Set<string>>();
 const AVAILABILITY_TREND_TABLES = new Set([
   'alarm_table',
@@ -68,20 +70,27 @@ async function getRemoteTableColumns(tableName: string): Promise<Set<string>> {
     return remoteTableColumnsCache.get(tableName)!;
   }
 
-  const rows = await remoteDbConnector.query(`
-    SELECT COLUMN_NAME
-    FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_NAME = '${escapeSqlLiteral(tableName)}'
-  `);
+  try {
+    const rows = await remoteDbConnector.query(`
+      SELECT COLUMN_NAME
+      FROM INFORMATION_SCHEMA.COLUMNS
+      WHERE TABLE_NAME = '${escapeSqlLiteral(tableName)}'
+    `);
 
-  const columns = new Set(
-    rows
-      .map((row) => String(pickField(row, ['COLUMN_NAME', 'column_name']) || '').trim())
-      .filter(Boolean)
-  );
+    const columns = new Set(
+      rows
+        .map((row) => String(pickField(row, ['COLUMN_NAME', 'column_name']) || '').trim())
+        .filter(Boolean)
+    );
 
-  remoteTableColumnsCache.set(tableName, columns);
-  return columns;
+    remoteTableColumnsCache.set(tableName, columns);
+    return columns;
+  } catch (err: any) {
+    // Column discovery failure is non-fatal — callers fall back to safe defaults.
+    // Do NOT cache the empty set so the next call can retry.
+    console.warn(`[compass.model] getRemoteTableColumns(${tableName}) failed: ${err?.message}`);
+    return new Set<string>();
+  }
 }
 
 function toIsoDate(value: unknown, fallback?: string): string {

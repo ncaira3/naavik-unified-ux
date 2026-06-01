@@ -1,12 +1,12 @@
 /**
  * AppGen Wrapper
- * Loads the AppGen UI running on port 5173 via iframe.
+ * Loads the AppGen UI running on port 5168 via iframe.
  */
 
 import { useRef, useEffect } from 'react';
 import { useTheme } from '../../context/ThemeContext';
 
-const APPGEN_URL = 'http://localhost:5173';
+const APPGEN_URL = 'http://localhost:5168';
 
 export default function AppGenWrapper() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
