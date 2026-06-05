@@ -1,6 +1,7 @@
 import { NaavikDBConnector } from '../services/naavik-db-connector.service.js';
 import { siteIdMapper } from '../services/site-id-mapper.service.js';
 import { mirrorOrRemote } from '../services/db-mirror/lib/mirror-or-remote.js';
+import { logger } from '../utils/logger.js';
 import type {
   CellKpiResponse,
   CellKpiViewType,
@@ -23,7 +24,10 @@ function escapeSqlLiteral(value: string): string {
 
 function normalizeDate(value?: string | null): string {
   const raw = String(value || '').trim();
-  return /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : new Date().toISOString().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+  // Use local date (not UTC) to avoid off-by-one when running late at night
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
 function toNumber(value: unknown): number | null {
@@ -267,8 +271,8 @@ export class SiteAnalysisModel {
     const endDate = normalizeDate(params.endDate || effectiveDate);
     const startDate = normalizeDate(params.startDate || (() => {
       const start = new Date(endDate);
-      start.setDate(start.getDate() - (viewType === 'hourly' ? 2 : 14));
-      return start.toISOString().slice(0, 10);
+      start.setDate(start.getDate() - (viewType === 'hourly' ? 2 : 30));
+      return `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-${String(start.getDate()).padStart(2, '0')}`;
     })());
     const kpiList = kpiNames.map((kpi) => `'${escapeSqlLiteral(kpi)}'`).join(', ');
 
@@ -321,23 +325,30 @@ export class SiteAnalysisModel {
       const includeNeighbors = kpiNames.some((kpi) => downtimeKpis.has(kpi));
       let usidList = [`'${escapeSqlLiteral(realUsid)}'`];
 
-      if (includeNeighbors) {
-        const neighborQuery = `
-          SELECT DISTINCT NEIGH_USID
-          FROM neighbors_table_date_id WITH (NOLOCK)
-          WHERE SOURCE_USID = '${escapeSqlLiteral(realUsid)}'
-            AND DATE_ID >= CAST('${escapeSqlLiteral(endDate)}' AS DATE)
-            AND DATE_ID <  DATEADD(day, 1, CAST('${escapeSqlLiteral(endDate)}' AS DATE))
-        `;
-        const neighborRows = await remoteDbConnector.query(neighborQuery) as Record<string, unknown>[];
-        const neighbors = neighborRows
-          .map((row) => String(pickField(row, ['NEIGH_USID', 'neigh_usid']) || '').trim())
-          .filter((value) => value && value !== realUsid)
-          .slice(0, 15);
-        usidList = usidList.concat(neighbors.map((neighbor) => `'${escapeSqlLiteral(neighbor)}'`));
+      if (includeNeighbors && !NaavikDBConnector.isRemoteUnreachable()) {
+        try {
+          const neighborQuery = `
+            SELECT DISTINCT NEIGH_USID
+            FROM neighbors_table_date_id WITH (NOLOCK)
+            WHERE SOURCE_USID = '${escapeSqlLiteral(realUsid)}'
+              AND DATE_ID >= CAST('${escapeSqlLiteral(endDate)}' AS DATE)
+              AND DATE_ID <  DATEADD(day, 1, CAST('${escapeSqlLiteral(endDate)}' AS DATE))
+          `;
+          const neighborRows = await remoteDbConnector.query(neighborQuery) as Record<string, unknown>[];
+          const neighbors = neighborRows
+            .map((row) => String(pickField(row, ['NEIGH_USID', 'neigh_usid']) || '').trim())
+            .filter((value) => value && value !== realUsid)
+            .slice(0, 15);
+          usidList = usidList.concat(neighbors.map((neighbor) => `'${escapeSqlLiteral(neighbor)}'`));
+        } catch (err) {
+          // Neighbor lookup is best-effort — if remote is slow/unavailable, just show the main site
+          logger.warn(`[getCellKpis:hourly] neighbor lookup failed for ${realUsid}, showing site only: ${(err as Error).message}`);
+        }
       }
 
       // Mirror-first: local hourly table covers the last 30 days for offender USIDs.
+      // Staleness gate: if local data doesn't reach within 2 days of the requested
+      // endDate, fall through to remote so the user sees the full requested range.
       const usidValues = usidList.map((u) => u.replace(/^'|'$/g, ''));
       rows = await mirrorOrRemote({
         local: {
@@ -361,10 +372,15 @@ export class SiteAnalysisModel {
                    AND kpi_name IN (${kpiList})
                  ORDER BY DATE_ID, HOUR_ID, cell_name, kpi_name`,
         tag: 'cell-kpis:hourly',
+        // No staleness gate for hourly — the mirror covers offender sites and
+        // the remote hourly table is too large to query reliably over the tunnel.
       }) as Record<string, unknown>[];
       rows = rows.map((row) => ({ ...row, is_neighbor: String(pickField(row, ['USID', 'usid']) || '') !== realUsid }));
     } else {
       // Mirror-first: local daily table covers the last 30 days for offender USIDs.
+      // Staleness gate: if the freshest local row is >3 days behind the requested
+      // endDate (e.g. mirror only has May 6–7 but user asked for last 30 days up to
+      // June 4), fall through to the remote DB for the full date range.
       rows = await mirrorOrRemote({
         local: {
           sql: `SELECT usid AS "USID",
@@ -387,6 +403,7 @@ export class SiteAnalysisModel {
                    AND kpi_name IN (${kpiList})
                  ORDER BY DATE_ID, cell_name, kpi_name`,
         tag: 'cell-kpis:daily',
+        staleness: { requestedDate: endDate, maxDays: 3, dateColumn: 'DATE_ID' },
       }) as Record<string, unknown>[];
     }
 

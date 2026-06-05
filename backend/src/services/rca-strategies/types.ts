@@ -87,6 +87,12 @@ export interface StrategyContext {
   alternativeBuckets?: Array<{ bucket: string; confidence: number }>;
   reasoning?: string;               // chain_of_thought when available
   solutionText?: string;            // RCA's own recommendation text when available
+  /**
+   * When true: skip DB-backed algorithms (LPE, outage tilt) and return the
+   * in-memory playbook immediately. Use for the precomputed-DB path where the
+   * bucket name is already known and speed is critical.
+   */
+  fast?: boolean;
 }
 
 export interface StrategyOutput {

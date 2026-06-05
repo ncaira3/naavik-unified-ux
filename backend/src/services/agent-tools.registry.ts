@@ -422,6 +422,11 @@ const tool_get_site_rca: AgentTool = {
       solutionCategory: parsed.name && parsed.name !== 'Unknown' ? parsed.name : undefined,
       intuitions: {},
     };
+    // Fast path: use the precomputed bucket to drive the in-memory strategy
+    // playbook + DataDict enrichment — NO additional DB queries. The full
+    // LPE / outage-tilt algorithms are still available via the deep
+    // investigation flow ("analyse site XXXXX") but we don't block the quick
+    // RCA answer on them.
     const tFanout = Date.now();
     const [strategy, paramPlan] = await Promise.all([
       buildStrategy({
@@ -432,10 +437,11 @@ const tool_get_site_rca: AgentTool = {
         alternativeBuckets: parsed.alternatives,
         reasoning: chainOfThought,
         solutionText: summary,
+        fast: true,   // ← skip DB-backed LPE / outage-tilt; use in-memory playbook
       }),
       enrichRecommendation(syntheticRca, { bucketHint: parsed.name }),
     ]);
-    logger.info(`[tool:get_site_rca] strategy + param plan in ${Date.now() - tFanout}ms · TOTAL ${Date.now() - tStart}ms`);
+    logger.info(`[tool:get_site_rca] fast strategy + param plan in ${Date.now() - tFanout}ms · TOTAL ${Date.now() - tStart}ms`);
 
     const llmText =
       `RCA ready for site ${siteId} · ${dateId}. ` +
@@ -496,12 +502,14 @@ const tool_run_rca_live: AgentTool = {
   name: 'run_rca_live',
   description:
     'Run a fresh root-cause analysis on a site by calling the live RCA service. ' +
-    'PRECONDITION: ONLY call this if get_site_rca was ALREADY tried on the same ' +
-    'siteId+date IN THIS TURN and returned a "No RCA found" message. Do not call ' +
-    'speculatively, do not call as the first action — always try get_site_rca first. ' +
-    'Also acceptable: the user explicitly used the words "live RCA", "fresh RCA", ' +
-    '"run RCA on the fly", or "rerun RCA". Slow (30-180s). Falls back to the ' +
-    'precomputed mirror automatically if the live service is unreachable.',
+    'PRECONDITION — STRICT: ONLY call this tool when ALL of the following are true: ' +
+    '(1) get_site_rca was already called on the same siteId+date in THIS conversation turn, ' +
+    '(2) get_site_rca returned a "No RCA found" message (not an rca_summary card), AND ' +
+    '(3) the user explicitly wants a fresh analysis. ' +
+    'If get_site_rca returned an rca_summary card (even without a recommendation), ' +
+    'do NOT call run_rca_live — the precomputed DB answer IS the answer. ' +
+    'Calling this without meeting all three conditions wastes 30–180 seconds. ' +
+    'Acceptable triggers for (3): user says "live RCA", "fresh RCA", "run RCA now", "rerun RCA".',
   parameters: {
     type: 'object',
     properties: {

@@ -233,6 +233,7 @@ Current date: ${today}. Default data date (freshest reliable): ${todayMinus3}.
 Guidelines:
 - Prefer calling tools over guessing. If the user asks about a site, call tools to get real data.
 - If the user gives a partial site ID or name, call find_site first to resolve it. Exception: for ticket/incident queries that include a USID number, skip find_site and call query_data directly — ticket_table is keyed by USID and does not require site resolution.
+- RCA SPEED RULE: For "explain RCA", "why is site X degraded", or any RCA request, ALWAYS call get_site_rca FIRST. If it returns an rca_summary card, you are DONE — do NOT call run_rca_live. The precomputed DB answer is fast and complete. run_rca_live is a LAST RESORT: only call it if get_site_rca explicitly returned "No RCA found" AND the user specifically asked for a live or fresh analysis. Calling run_rca_live speculatively costs 30–180 seconds of unnecessary wait time.
 - When showing site diagnostics (KPIs, RCA, dashboard), prefer show_kpi_dashboard
   for a rich in-chat experience. Use get_site_kpis for a quick numeric snapshot.
 - Keep assistant text concise — rich data goes into UI blocks automatically.

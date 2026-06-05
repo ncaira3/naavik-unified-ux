@@ -364,7 +364,8 @@ class ApiService {
     }
   ) {
     const dateKey = params.dateId || params.endDate || params.startDate || 'latest';
-    const cacheKey = `site-kpis:${siteId}:${params.viewType}:${dateKey}:${params.startDate || ''}:${params.endDate || ''}:${params.kpiNames.join('|')}`;
+    // v2 suffix busts stale entries that were cached with sparse mirror data
+    const cacheKey = `site-kpis:v2:${siteId}:${params.viewType}:${dateKey}:${params.startDate || ''}:${params.endDate || ''}:${params.kpiNames.join('|')}`;
     const group = `${siteId}:${dateKey}`;
     const cached = await localCache.get<ApiResponse<CellKpiResponse>>(cacheKey);
     if (cached) {
@@ -381,7 +382,7 @@ class ApiService {
       },
     });
     if (response.data?.data) {
-      await localCache.set(cacheKey, response.data, { ttlMs: 4 * 60 * 60 * 1000, groupNamespace: 'site-date-kpi', group, maxGroups: 10 });
+      await localCache.set(cacheKey, response.data, { ttlMs: 60 * 60 * 1000, groupNamespace: 'site-date-kpi', group, maxGroups: 10 });
     }
     return response.data;
   }

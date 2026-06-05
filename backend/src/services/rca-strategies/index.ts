@@ -193,6 +193,51 @@ async function buildOutageStrategy(ctx: StrategyContext): Promise<StrategyOutput
 
 // ─── Strategy library ───────────────────────────────────────────────────────
 
+// ─── Fast congestion playbook (no DB) ───────────────────────────────────────
+// Used when we already have a precomputed bucket from the DB and need a quick
+// recommendation without querying PRB profiles or neighbour tables.
+
+function fastCongestionPlaybook(ctx: StrategyContext): StrategyOutput {
+  return {
+    headline: 'Congestion — shift traffic to under-loaded neighbours and rebalance inter-band load.',
+    confidence: 'high',
+    actions: [
+      {
+        kind: 'load_shed',
+        title: 'Reduce cellIndividualOffset on top-HO neighbours',
+        rationale:
+          'Traffic Increase congestion means the site is PRB-saturated at busy hour. ' +
+          'Lowering CIO on co-sited neighbours (typically −2 to −4 dB) biases UEs toward ' +
+          'cells with headroom before the load spike peaks.',
+        confidence: 'high',
+        params: [
+          { paramName: 'cellIndividualOffset', change: 'Decrease by 2–4 dB on top-3 HO neighbours', impact: 'Shifts active users; verify HOSR remains >95% after change.' },
+        ],
+      },
+      {
+        kind: 'layer_move',
+        title: 'Move busy-hour load to a higher-band co-located carrier',
+        rationale:
+          'If a mid/high-band carrier (AWS, PCS, mmWave) is co-located and under-loaded, ' +
+          'increasing qRxLevMin on the congested cell biases capable UEs upward, freeing ' +
+          'low-band PRBs for coverage-dependent traffic.',
+        confidence: 'medium',
+        params: [
+          { paramName: 'qRxLevMin', change: 'Increase by 2–6 dB on congested low-band cells', impact: 'Forces higher-capability UEs to camping on the less-loaded layer.' },
+        ],
+      },
+      {
+        kind: 'monitor',
+        title: 'Run detailed LPE analysis for exact per-cell CIO delta',
+        rationale:
+          `Use the deep-investigation flow ("analyse site ${ctx.siteId}") to get ` +
+          `PRB-weighted CIO recommendations against the live busy-hour profile.`,
+        confidence: 'medium',
+      },
+    ],
+  };
+}
+
 async function genericPlaybook(family: BucketFamily, ctx: StrategyContext): Promise<StrategyOutput> {
   switch (family) {
     case 'coverage':
@@ -310,10 +355,42 @@ export async function buildStrategy(ctx: StrategyContext): Promise<StrategyOutpu
     return cached.out;
   }
 
-  // Use the parsed family for routing; the strategy still receives the raw
-  // bucket name and the full context.
   const family = parsed.family;
   const t0 = Date.now();
+
+  // ── Fast path: no DB queries — use in-memory playbooks only ────────────────
+  // Used by get_site_rca (precomputed DB path) where bucket is already known
+  // and we need a quick answer without additional round-trips.
+  if (ctx.fast) {
+    logger.info(`[rca-strategy] FAST family=${family} bucket="${parsed.name}" site=${ctx.siteId}`);
+    let out: StrategyOutput;
+    if (family === 'congestion') {
+      out = fastCongestionPlaybook({ ...ctx, bucketName: parsed.name });
+    } else if (family === 'outage') {
+      // Use the hardcoded outage fallback — no geometry DB queries
+      out = {
+        headline: `Outage at ${ctx.siteId} — verify cells are up and consider neighbour tilt compensation.`,
+        confidence: 'medium',
+        actions: [
+          { kind: 'escalate', title: 'Open a hardware/transport ticket for the affected cell', rationale: 'Confirm the cell is down at the eNB / gNB and dispatch O&M if needed.', confidence: 'high' },
+          { kind: 'tilt', title: 'Consider reducing electrical tilt on aligned neighbours', rationale: 'Neighbour cells within 60° of the outage bearing and below 65% PRB can extend coverage by 1–3°.', confidence: 'medium', params: [{ paramName: 'ELECTRICALANTENNATILT', change: 'Decrease by 1–3° on aligned neighbours', impact: 'Widens footprint toward outage area.' }] },
+          { kind: 'validate', title: 'After recovery, revert any tilt changes', rationale: 'Outage-compensation tilts are temporary. Restore baseline once the affected cells are back up.', confidence: 'medium' },
+        ],
+      };
+    } else {
+      out = await genericPlaybook(family, { ...ctx, bucketName: parsed.name });
+    }
+    const emptyCtx: SimContext = {};
+    for (const a of out.actions) {
+      if (!a.simulation) a.simulation = simulateAction(a, emptyCtx);
+    }
+    // Cache the fast result — avoids even the in-memory work on repeat calls
+    strategyCache.set(key, { fetchedAt: Date.now(), out });
+    logger.info(`[rca-strategy] FAST built in ${Date.now() - t0}ms · ${out.actions.length} actions`);
+    return out;
+  }
+
+  // ── Full path: DB-backed algorithms (LPE, outage tilt) ────────────────────
   logger.info(`[rca-strategy] dispatch family=${family} bucket="${parsed.name}" site=${ctx.siteId} ${ctx.date}`);
 
   let out: StrategyOutput;

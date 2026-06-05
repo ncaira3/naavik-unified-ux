@@ -78,10 +78,15 @@ const KPI_PALETTE = [
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+function localIso(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
 function shiftDate(base: string, offsetDays: number): string {
-  const d = new Date(base);
+  // Parse as local date (appending T00:00:00 avoids UTC midnight shift)
+  const d = new Date(`${base}T00:00:00`);
   d.setDate(d.getDate() + offsetDays);
-  return d.toISOString().slice(0, 10);
+  return localIso(d);
 }
 
 function formatDateLabel(value: string): string {
@@ -403,7 +408,7 @@ export interface ChatKpiDashboardProps {
 function yesterdayISO(): string {
   const d = new Date();
   d.setDate(d.getDate() - 1);
-  return d.toISOString().slice(0, 10);
+  return localIso(d);
 }
 
 // ── Save Dashboard Modal ──────────────────────────────────────────────────────
